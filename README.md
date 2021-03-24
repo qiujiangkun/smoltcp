@@ -170,9 +170,9 @@ or `BufWriter` is used, which are of course not available on heap-less systems.
 
 This feature is disabled by default.
 
-### Features `phy-raw_socket` and `phy-tap_interface`
+### Features `phy-raw_socket` and `phy-tuntap_interface`
 
-Enable `smoltcp::phy::RawSocket` and `smoltcp::phy::TapInterface`, respectively.
+Enable `smoltcp::phy::RawSocket` and `smoltcp::phy::TunTapInterface`, respectively.
 
 These features are enabled by default.
 
@@ -219,6 +219,16 @@ sudo ip6tables -t nat -A POSTROUTING -s fdaa::/64 -j MASQUERADE
 sudo sysctl -w net.ipv6.conf.all.forwarding=1
 ```
 
+sudo ip tuntap add name tun0 mode tun user $USER
+sudo ip link set tun0 up
+sudo ip addr add 192.168.69.100/24 dev tun0
+sudo ip -6 addr add fe80::100/64 dev tun0
+sudo ip -6 addr add fdaa::100/64 dev tun0
+sudo ip -6 route add fe80::/64 dev tun0
+sudo ip -6 route add fdaa::/64 dev tun0
+
+sudo ip tuntap del name tap0 mode tap
+sudo ip tuntap del name tun0 mode tun
 ### Fault injection
 
 In order to demonstrate the response of _smoltcp_ to adverse network conditions, all examples
