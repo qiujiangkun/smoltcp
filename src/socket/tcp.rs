@@ -8,7 +8,7 @@ use core::task::Waker;
 
 use crate::{Error, Result};
 use crate::time::{Duration, Instant};
-use crate::socket::{Socket, SocketMeta, SocketHandle, PollAt};
+use crate::socket::{SocketMeta, SocketHandle, PollAt};
 use crate::storage::{Assembler, RingBufferSync};
 #[cfg(feature = "async")]
 use crate::socket::WakerRegistration;
@@ -1947,12 +1947,6 @@ impl TcpSocket {
                 .iter()
                 .min().unwrap_or(&PollAt::Ingress)
         }
-    }
-}
-
-impl<'a> Into<Socket<'a>> for TcpSocket {
-    fn into(self) -> Socket<'a> {
-        Socket::Tcp(self)
     }
 }
 
