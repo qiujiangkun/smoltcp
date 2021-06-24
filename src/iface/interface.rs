@@ -1028,9 +1028,9 @@ impl<'a> InterfaceInner<'a> {
 
         // Pass every IP packet to all raw sockets we have registered.
         for mut raw_socket in sockets.iter_mut().filter_map(RawSocket::downcast) {
-            if !raw_socket.accepts(&ip_repr) { continue; }
+            if !raw_socket.accepts(ip_repr) { continue; }
 
-            match raw_socket.process(&ip_repr, ip_payload, &checksum_caps) {
+            match raw_socket.process(ip_repr, ip_payload, &checksum_caps) {
                 // The packet is valid and handled by socket.
                 Ok(()) => handled_by_raw_socket = true,
                 // The socket buffer is full or the packet was truncated
@@ -1047,7 +1047,7 @@ impl<'a> InterfaceInner<'a> {
     (&mut self, sockets: &mut SocketSet, timestamp: Instant,
      ipv6_packet: &Ipv6Packet<&'frame T>) ->
      Result<Option<IpPacket<'frame>>> {
-        let ipv6_repr = Ipv6Repr::parse(&ipv6_packet)?;
+        let ipv6_repr = Ipv6Repr::parse(ipv6_packet)?;
 
         if !ipv6_repr.src_addr.is_unicast() {
             // Discard packets with non-unicast source addresses.
@@ -1116,7 +1116,7 @@ impl<'a> InterfaceInner<'a> {
      Result<Option<IpPacket<'frame>>>
     {
         let checksum_caps = self.device_capabilities.checksum.clone();
-        let ipv4_repr = Ipv4Repr::parse(&ipv4_packet, &checksum_caps)?;
+        let ipv4_repr = Ipv4Repr::parse(ipv4_packet, &checksum_caps)?;
 
         if !self.is_unicast_v4(ipv4_repr.src_addr) {
             // Discard packets with non-unicast source addresses.

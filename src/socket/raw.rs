@@ -213,7 +213,7 @@ impl<'a> RawSocket<'a> {
         let header_len = ip_repr.buffer_len();
         let total_len  = header_len + payload.len();
         let packet_buf = self.rx_buffer.enqueue(total_len, ())?;
-        ip_repr.emit(&mut packet_buf[..header_len], &checksum_caps);
+        ip_repr.emit(&mut packet_buf[..header_len], checksum_caps);
         packet_buf[header_len..].copy_from_slice(payload);
 
         net_trace!("{}:{}:{}: receiving {} octets",
@@ -264,7 +264,7 @@ impl<'a> RawSocket<'a> {
         let ip_protocol = self.ip_protocol;
         let ip_version  = self.ip_version;
         self.tx_buffer.dequeue_with(|&mut (), packet_buf| {
-            match prepare(ip_protocol, packet_buf, &checksum_caps) {
+            match prepare(ip_protocol, packet_buf, checksum_caps) {
                 Ok((ip_repr, raw_packet)) => {
                     net_trace!("{}:{}:{}: sending {} octets",
                                handle, ip_version, ip_protocol,

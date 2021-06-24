@@ -1200,7 +1200,7 @@ impl TcpSocket {
                     net_debug!("{}:{}:{}: unacceptable ACK ({} not in {}...{})",
                                self.meta.handle, self.local_endpoint, self.remote_endpoint,
                                ack_number, self.local_seq_no, self.local_seq_no + unacknowledged);
-                    return Ok(Some(self.ack_reply(ip_repr, &repr)))
+                    return Ok(Some(self.ack_reply(ip_repr, repr)))
                 }
             }
         }

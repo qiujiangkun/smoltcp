@@ -107,7 +107,7 @@ impl<D: for<'a> Device<'a>> FaultInjector<D> {
             rx_bucket:   0,
         };
         FaultInjector {
-            inner: inner,
+            inner,
             state: RefCell::new(state),
             config: Config::default(),
         }
@@ -206,14 +206,14 @@ impl<'a, D> Device<'a> for FaultInjector<D>
         let &mut Self { ref mut inner, ref state, config } = self;
         inner.receive().map(|(rx_token, tx_token)| {
             let rx = RxToken {
-                state:   &state,
-                config:  config,
+                state,
+                config,
                 token:   rx_token,
                 corrupt: [0; MTU],
             };
             let tx = TxToken {
-                state:   &state,
-                config:  config,
+                state,
+                config,
                 token:   tx_token,
                 junk:    [0; MTU],
             };
@@ -224,9 +224,9 @@ impl<'a, D> Device<'a> for FaultInjector<D>
     fn transmit(&'a mut self) -> Option<Self::TxToken> {
         let &mut Self { ref mut inner, ref state, config } = self;
         inner.transmit().map(|token| TxToken {
-            state:  &state,
-            config: config,
-            token: token,
+            state,
+            config,
+            token,
             junk:   [0; MTU],
         })
     }

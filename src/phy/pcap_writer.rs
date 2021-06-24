@@ -207,7 +207,7 @@ impl<Tx: phy::TxToken, S: PcapSink> phy::TxToken for TxToken<Tx, S> {
             let result = f(buffer);
             match mode {
                 PcapMode::Both | PcapMode::TxOnly =>
-                    sink.packet(timestamp, &buffer),
+                    sink.packet(timestamp, buffer),
                 PcapMode::RxOnly => ()
             };
             result
