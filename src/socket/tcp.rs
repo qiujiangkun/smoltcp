@@ -9,12 +9,13 @@ use core::task::Waker;
 use crate::{Error, Result};
 use crate::time::{Duration, Instant};
 use crate::socket::{SocketMeta, SocketHandle, PollAt};
-use crate::storage::{Assembler, RingBuffer, SocketBufferSender, SocketBufferReceiver, new_socket_buffer_channel, RingBufferSync};
+use crate::storage::{Assembler, RingBuffer, SocketBufferReceiver, RingBufferSync};
 #[cfg(feature = "async")]
 use crate::socket::WakerRegistration;
-use crate::wire::{IpProtocol, IpRepr, IpAddress, IpEndpoint, TcpSeqNumber, TcpRepr, TcpControl};
+use crate::wire::{IpProtocol, IpRepr, IpAddress, IpEndpoint, TcpSeqNumber, TcpRepr, TcpControl, AtomicTcpSeqNumber};
 use crossbeam::atomic::AtomicCell;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 /// A TCP socket ring buffer.
 pub type SocketBuffer<'a> = RingBuffer<'a, u8>;
@@ -288,7 +289,7 @@ pub struct TcpSocket<'a> {
     timer: Timer,
     rtte: RttEstimator,
     assembler: Assembler,
-    rx_buffer: SocketBuffer<'a>,
+    rx_buffer: Arc<SocketBufferSync<'a>>,
     rx_fin_received: bool,
     tx_buffer: Arc<SocketBufferSync<'a>>,
 
@@ -316,7 +317,7 @@ pub struct TcpSocket<'a> {
     local_seq_no: TcpSeqNumber,
     /// The sequence number corresponding to the beginning of the receive buffer.
     /// I.e. userspace reading n bytes adds n to remote_seq_no.
-    remote_seq_no: TcpSeqNumber,
+    remote_seq_no: Arc<AtomicTcpSeqNumber>,
     /// The last sequence number sent.
     /// I.e. in an idle socket, local_seq_no+tx_buffer.len().
     remote_last_seq: TcpSeqNumber,
@@ -358,7 +359,6 @@ pub struct TcpSocket<'a> {
     #[cfg(feature = "async")]
     tx_waker: WakerRegistration,
 
-    read_buffer: Option<SocketBufferSender>,
 }
 
 const DEFAULT_MSS: usize = 536;
@@ -366,7 +366,7 @@ const DEFAULT_MSS: usize = 536;
 impl<'a> TcpSocket<'a> {
     #[allow(unused_comparisons)] // small usize platforms always pass rx_capacity check
     /// Create a socket using the given buffers.
-    pub fn new(rx_buffer: impl Into<SocketBuffer<'a>>, tx_buffer: impl Into<SocketBufferSync<'a>>) -> TcpSocket<'a>
+    pub fn new(rx_buffer: impl Into<SocketBufferSync<'a>>, tx_buffer: impl Into<SocketBufferSync<'a>>) -> TcpSocket<'a>
     {
         let (rx_buffer, tx_buffer) = (rx_buffer.into(), tx_buffer.into());
         let rx_capacity = rx_buffer.capacity();
@@ -388,7 +388,7 @@ impl<'a> TcpSocket<'a> {
             rtte: RttEstimator::default(),
             assembler: Assembler::new(rx_buffer.capacity()),
             tx_buffer: Arc::new(tx_buffer),
-            rx_buffer: rx_buffer,
+            rx_buffer: Arc::new(rx_buffer),
             rx_fin_received: false,
             timeout: None,
             keep_alive: None,
@@ -397,7 +397,7 @@ impl<'a> TcpSocket<'a> {
             local_endpoint: IpEndpoint::default(),
             remote_endpoint: IpEndpoint::default(),
             local_seq_no: TcpSeqNumber::default(),
-            remote_seq_no: TcpSeqNumber::default(),
+            remote_seq_no: Arc::new(AtomicTcpSeqNumber::default()),
             remote_last_seq: TcpSeqNumber::default(),
             remote_last_ack: None,
             remote_last_win: 0,
@@ -417,7 +417,6 @@ impl<'a> TcpSocket<'a> {
             rx_waker: WakerRegistration::new(),
             #[cfg(feature = "async")]
             tx_waker: WakerRegistration::new(),
-            read_buffer: None,
         }
     }
 
@@ -599,7 +598,7 @@ impl<'a> TcpSocket<'a> {
         self.local_endpoint = IpEndpoint::default();
         self.remote_endpoint = IpEndpoint::default();
         self.local_seq_no = TcpSeqNumber::default();
-        self.remote_seq_no = TcpSeqNumber::default();
+        self.remote_seq_no = Arc::new(AtomicTcpSeqNumber::default());
         self.remote_last_seq = TcpSeqNumber::default();
         self.remote_last_ack = None;
         self.remote_last_win = 0;
@@ -902,17 +901,17 @@ impl<'a> TcpSocket<'a> {
     }
 
     fn recv_impl<'b, F, R>(&'b mut self, f: F) -> Result<R>
-        where F: FnOnce(&'b mut SocketBuffer<'a>) -> (usize, R) {
+        where F: FnOnce(&'b SocketBufferSync<'a>) -> (usize, R) {
         self.recv_error_check()?;
 
         let _old_length = self.rx_buffer.len();
-        let (size, result) = f(&mut self.rx_buffer);
-        self.remote_seq_no += size;
+        let (size, result) = f(&self.rx_buffer);
+        self.remote_seq_no.add_assign(size);
         if size > 0 {
             #[cfg(any(test, feature = "verbose"))]
             net_trace!("{}:{}:{}: rx buffer: dequeueing {} octets (now {})",
                        self.meta.handle, self.local_endpoint, self.remote_endpoint,
-                       size, _old_length - size);
+                       size, _old_length as isize - size as isize);
         }
         Ok(result)
     }
@@ -928,7 +927,7 @@ impl<'a> TcpSocket<'a> {
     /// In all other cases, `Err(Error::Illegal)` is returned and previously received data (if any)
     /// may be incomplete (truncated).
     pub fn recv<'b, F, R>(&'b mut self, f: F) -> Result<R>
-        where F: FnOnce(&'b mut [u8]) -> (usize, R) {
+        where F: FnOnce(&'b [u8]) -> (usize, R) {
         self.recv_impl(|rx_buffer| {
             rx_buffer.dequeue_many_with(f)
         })
@@ -993,28 +992,13 @@ impl<'a> TcpSocket<'a> {
     pub fn set_sync_write_buffer(&mut self) -> Arc<SocketBufferSync<'a>> {
         Arc::clone(&self.tx_buffer)
     }
-    pub fn set_sync_read_buffer(&mut self) -> SocketBufferReceiver {
-        assert!(self.read_buffer.is_none());
-        let (tx, rx) = new_socket_buffer_channel();
-        self.read_buffer = Some(tx);
-        rx
-    }
-    pub fn sync_read_buffer(&mut self) {
-        if self.read_buffer.is_some() {
-            let vec = self.recv(|buf| {
-                if buf.len() > 0 {
-                    let vec = buf.to_vec();
-                    (buf.len(), Some(vec))
-                } else {
-                    (buf.len(), None)
-                }
-            });
-            match vec {
-                Ok(Some(vec)) => {
-                    self.read_buffer.as_ref().unwrap().send(vec).unwrap();
-                }
-                _ => {}
-            }
+    pub fn set_sync_read_buffer(&mut self) -> SocketBufferReceiver<'a> {
+        SocketBufferReceiver {
+            rx_buffer: Arc::clone(&self.rx_buffer),
+            remote_seq_no: Arc::clone(&self.remote_seq_no),
+            local_endpoint: self.local_endpoint,
+            remote_endpoint: self.remote_endpoint,
+            meta: self.meta
         }
     }
     fn set_state(&mut self, state: State) {
@@ -1090,7 +1074,7 @@ impl<'a> TcpSocket<'a> {
         // and an acknowledgment indicating the next sequence number expected
         // to be received.
         reply_repr.seq_number = self.remote_last_seq;
-        reply_repr.ack_number = Some(self.remote_seq_no + self.rx_buffer.len());
+        reply_repr.ack_number = Some(self.remote_seq_no.to_raw() + self.rx_buffer.len());
         self.remote_last_ack = reply_repr.ack_number;
 
         // From RFC 1323:
@@ -1236,9 +1220,9 @@ impl<'a> TcpSocket<'a> {
                 }
             }
         }
-
-        let window_start = self.remote_seq_no + self.rx_buffer.len();
-        let window_end = self.remote_seq_no + self.rx_buffer.capacity();
+        let remote_seq_no = self.remote_seq_no.to_raw();
+        let window_start = remote_seq_no + self.rx_buffer.len();
+        let window_end = remote_seq_no + self.rx_buffer.capacity();
         let segment_start = repr.seq_number;
         let segment_end = repr.seq_number + repr.segment_len();
 
@@ -1357,7 +1341,7 @@ impl<'a> TcpSocket<'a> {
                 self.remote_endpoint = IpEndpoint::new(ip_repr.src_addr(), repr.src_port);
                 // FIXME: use something more secure here
                 self.local_seq_no = TcpSeqNumber(-repr.seq_number.0);
-                self.remote_seq_no = repr.seq_number + 1;
+                self.remote_seq_no.0.store((repr.seq_number + 1).0, Ordering::Release);
                 self.remote_last_seq = self.local_seq_no;
                 self.remote_has_sack = repr.sack_permitted;
                 if let Some(max_seg_size) = repr.max_seg_size {
@@ -1382,7 +1366,7 @@ impl<'a> TcpSocket<'a> {
             // It's not obvious from RFC 793 that this is permitted, but
             // 7th and 8th steps in the "SEGMENT ARRIVES" event describe this behavior.
             (State::SynReceived, TcpControl::Fin) => {
-                self.remote_seq_no += 1;
+                self.remote_seq_no.add_assign(1);
                 self.rx_fin_received = true;
                 self.set_state(State::CloseWait);
                 self.timer.set_for_idle(timestamp, self.keep_alive);
@@ -1393,7 +1377,7 @@ impl<'a> TcpSocket<'a> {
                 net_trace!("{}:{}:{}: received SYN|ACK",
                            self.meta.handle, self.local_endpoint, self.remote_endpoint);
                 self.local_endpoint = IpEndpoint::new(ip_repr.dst_addr(), repr.dst_port);
-                self.remote_seq_no = repr.seq_number + 1;
+                self.remote_seq_no.0.store((repr.seq_number + 1).0,Ordering::Release);
                 self.remote_last_seq = self.local_seq_no + 1;
                 self.remote_last_ack = Some(repr.seq_number);
                 if let Some(max_seg_size) = repr.max_seg_size {
@@ -1413,7 +1397,7 @@ impl<'a> TcpSocket<'a> {
 
             // FIN packets in ESTABLISHED state indicate the remote side has closed.
             (State::Established, TcpControl::Fin) => {
-                self.remote_seq_no += 1;
+                self.remote_seq_no.add_assign(1);
                 self.rx_fin_received = true;
                 self.set_state(State::CloseWait);
                 self.timer.set_for_idle(timestamp, self.keep_alive);
@@ -1431,7 +1415,7 @@ impl<'a> TcpSocket<'a> {
             // FIN packets in FIN-WAIT-1 state change it to CLOSING, or to TIME-WAIT
             // if they also acknowledge our FIN.
             (State::FinWait1, TcpControl::Fin) => {
-                self.remote_seq_no += 1;
+                self.remote_seq_no.add_assign(1);
                 self.rx_fin_received = true;
                 if ack_of_fin {
                     self.set_state(State::TimeWait);
@@ -1449,7 +1433,7 @@ impl<'a> TcpSocket<'a> {
 
             // FIN packets in FIN-WAIT-2 state change it to TIME-WAIT.
             (State::FinWait2, TcpControl::Fin) => {
-                self.remote_seq_no += 1;
+                self.remote_seq_no.add_assign(1);
                 self.rx_fin_received = true;
                 self.set_state(State::TimeWait);
                 self.timer.set_for_close(timestamp);
@@ -1590,7 +1574,6 @@ impl<'a> TcpSocket<'a> {
                        self.meta.handle, self.local_endpoint, self.remote_endpoint,
                        contig_len, self.rx_buffer.len() + contig_len);
             self.rx_buffer.enqueue_unallocated(contig_len);
-            self.sync_read_buffer();
             // There's new data in rx_buffer, notify waiting task if any.
             #[cfg(feature = "async")]
                 self.rx_waker.wake();
@@ -1685,7 +1668,7 @@ impl<'a> TcpSocket<'a> {
 
     fn ack_to_transmit(&self) -> bool {
         if let Some(remote_last_ack) = self.remote_last_ack {
-            remote_last_ack < self.remote_seq_no + self.rx_buffer.len()
+            (remote_last_ack.0 as usize) < self.remote_seq_no.0.load(Ordering::Acquire) as usize + self.rx_buffer.len()
         } else {
             false
         }
@@ -1784,7 +1767,7 @@ impl<'a> TcpSocket<'a> {
             dst_port: self.remote_endpoint.port,
             control: TcpControl::None,
             seq_number: self.remote_last_seq,
-            ack_number: Some(self.remote_seq_no + self.rx_buffer.len()),
+            ack_number: Some(self.remote_seq_no.to_raw() + self.rx_buffer.len()),
             window_len: self.scaled_window(),
             window_scale: None,
             max_seg_size: None,
@@ -2183,7 +2166,7 @@ mod test {
         #[cfg(feature = "log")]
             init_logger();
 
-        let rx_buffer = SocketBuffer::new(vec![0; rx_len]);
+        let rx_buffer = SocketBufferSync::new(vec![0; rx_len]);
         let tx_buffer = SocketBufferSync::new(vec![0; tx_len]);
         let mut socket = TcpSocket::new(rx_buffer, tx_buffer);
         socket.set_ack_delay(None);
@@ -2199,7 +2182,7 @@ mod test {
         s.local_endpoint = LOCAL_END;
         s.remote_endpoint = REMOTE_END;
         s.local_seq_no = LOCAL_SEQ;
-        s.remote_seq_no = REMOTE_SEQ + 1;
+        s.remote_seq_no.0.store(REMOTE_SEQ.0 + 1, Ordering::Release);
         s.remote_last_seq = LOCAL_SEQ;
         s.remote_win_len = 256;
         s
@@ -2261,14 +2244,14 @@ mod test {
         let mut s = socket_fin_wait_1();
         s.state.store(State::Closing);
         s.remote_last_seq = LOCAL_SEQ + 1 + 1;
-        s.remote_seq_no = REMOTE_SEQ + 1 + 1;
+        s.remote_seq_no.0.store(REMOTE_SEQ.0 + 1 + 1, Ordering::Release);
         s
     }
 
     fn socket_time_wait(from_closing: bool) -> TcpSocket<'static> {
         let mut s = socket_fin_wait_2();
         s.state.store(State::TimeWait);
-        s.remote_seq_no = REMOTE_SEQ + 1 + 1;
+        s.remote_seq_no.0.store(REMOTE_SEQ.0 + 1 + 1, Ordering::Release);
         if from_closing {
             s.remote_last_ack = Some(REMOTE_SEQ + 1 + 1);
         }
@@ -2279,7 +2262,7 @@ mod test {
     fn socket_close_wait() -> TcpSocket<'static> {
         let mut s = socket_established();
         s.state.store(State::CloseWait);
-        s.remote_seq_no = REMOTE_SEQ + 1 + 1;
+        s.remote_seq_no.0.store(REMOTE_SEQ.0 + 1 + 1, Ordering::Release);
         s.remote_last_ack = Some(REMOTE_SEQ + 1 + 1);
         s
     }
@@ -2943,7 +2926,7 @@ mod test {
         let mut s = socket_established();
         // Update our scaling parameters for a TCP with a scaled buffer.
         assert_eq!(s.rx_buffer.len(), 0);
-        s.rx_buffer = SocketBuffer::new(vec![0; 262143]);
+        s.rx_buffer = Arc::new(SocketBufferSync::new(vec![0; 262143]));
         s.assembler = Assembler::new(s.rx_buffer.capacity());
         s.remote_win_scale = Some(0);
         s.remote_last_win = 65535;
@@ -3103,7 +3086,7 @@ mod test {
             ack_number: Some(REMOTE_SEQ + 1),
             ..RECV_TEMPL
         })));
-        assert_eq!(s.remote_seq_no, REMOTE_SEQ + 1);
+        assert_eq!(s.remote_seq_no.to_raw(), REMOTE_SEQ + 1);
     }
 
     #[test]
@@ -3598,7 +3581,7 @@ mod test {
         });
         assert_eq!(s.state(), State::Established);
         assert_eq!(s.local_seq_no, LOCAL_SEQ + 1);
-        assert_eq!(s.remote_seq_no, REMOTE_SEQ + 1);
+        assert_eq!(s.remote_seq_no.to_raw(), REMOTE_SEQ + 1);
     }
 
     #[test]
@@ -4585,7 +4568,7 @@ mod test {
     #[test]
     fn test_zero_window_ack() {
         let mut s = socket_established();
-        s.rx_buffer = SocketBuffer::new(vec![0; 6]);
+        s.rx_buffer = Arc::new(SocketBufferSync::new(vec![0; 6]));
         s.assembler = Assembler::new(s.rx_buffer.capacity());
         send!(s, TcpRepr {
             seq_number: REMOTE_SEQ + 1,
@@ -4615,7 +4598,7 @@ mod test {
     #[test]
     fn test_zero_window_ack_on_window_growth() {
         let mut s = socket_established();
-        s.rx_buffer = SocketBuffer::new(vec![0; 6]);
+        s.rx_buffer = Arc::new(SocketBufferSync::new(vec![0; 6]));
         s.assembler = Assembler::new(s.rx_buffer.capacity());
         send!(s, TcpRepr {
             seq_number: REMOTE_SEQ + 1,
@@ -4679,7 +4662,7 @@ mod test {
     #[test]
     fn test_announce_window_after_read() {
         let mut s = socket_established();
-        s.rx_buffer = SocketBuffer::new(vec![0; 6]);
+        s.rx_buffer = Arc::new(SocketBufferSync::new(vec![0; 6]));
         s.assembler = Assembler::new(s.rx_buffer.capacity());
         send!(s, TcpRepr {
             seq_number: REMOTE_SEQ + 1,
@@ -5026,7 +5009,7 @@ mod test {
     #[test]
     fn test_buffer_wraparound_rx() {
         let mut s = socket_established();
-        s.rx_buffer = SocketBuffer::new(vec![0; 6]);
+        s.rx_buffer = Arc::new(SocketBufferSync::new(vec![0; 6]));
         s.assembler = Assembler::new(s.rx_buffer.capacity());
         send!(s, TcpRepr {
             seq_number: REMOTE_SEQ + 1,
@@ -5346,7 +5329,7 @@ mod test {
     #[test]
     fn test_doesnt_accept_wrong_port() {
         let mut s = socket_established();
-        s.rx_buffer = SocketBuffer::new(vec![0; 6]);
+        s.rx_buffer = Arc::new(SocketBufferSync::new(vec![0; 6]));
         s.assembler = Assembler::new(s.rx_buffer.capacity());
 
         let tcp_repr = TcpRepr {

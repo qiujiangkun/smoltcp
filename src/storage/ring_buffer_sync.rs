@@ -1,64 +1,113 @@
 #![allow(unsafe_code)]
 
-use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use core::cmp;
 use managed::ManagedSlice;
 use crate::{Error, Result};
 use crate::storage::Resettable;
-
-
-static CNT: AtomicUsize = AtomicUsize::new(1);
-
-pub fn new_socket_buffer_channel() -> (SocketBufferSender, SocketBufferReceiver) {
-    let (tx, rx) = crossbeam::channel::unbounded();
-    (
-        SocketBufferSender {
-            tx,
-            id: CNT.fetch_add(1, Ordering::AcqRel),
-        },
-        SocketBufferReceiver {
-            rx,
-            id: CNT.fetch_add(1, Ordering::AcqRel),
-        },
-    )
-}
-#[derive(Debug)]
-pub struct SocketBufferReceiver {
-    rx: crossbeam::channel::Receiver<Vec<u8>>,
-    pub id: usize,
-}
+use std::sync::Arc;
+use crate::wire::{AtomicTcpSeqNumber, IpEndpoint};
+use crate::socket::SocketMeta;
 
 #[derive(Debug)]
-pub struct SocketBufferSender {
-    tx: crossbeam::channel::Sender<Vec<u8>>,
-    pub id: usize,
+pub struct SocketBufferReceiver<'a> {
+    pub(crate) rx_buffer: Arc<RingBufferSync<'a, u8>>,
+    pub(crate) remote_seq_no: Arc<AtomicTcpSeqNumber>,
+    pub(crate) local_endpoint: IpEndpoint,
+    pub(crate) remote_endpoint: IpEndpoint,
+    pub(crate) meta: SocketMeta
 }
-impl Drop for SocketBufferSender {
+
+impl<'a> Drop for SocketBufferReceiver<'a> {
     fn drop(&mut self) {
-        net_debug!("SocketBufferSender dropped {}\n{:?}", self.id, backtrace::Backtrace::new());
-    }
-}
-impl Drop for SocketBufferReceiver {
-    fn drop(&mut self) {
-        net_debug!("SocketBufferReceiver dropped {}\n{:?}", self.id, backtrace::Backtrace::new());
-    }
-}
-impl Deref for SocketBufferReceiver {
-    type Target = crossbeam::channel::Receiver<Vec<u8>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.rx
+        net_debug!("SocketBufferReceiver dropped\n{:?}", backtrace::Backtrace::new());
     }
 }
 
-impl Deref for SocketBufferSender {
-    type Target = crossbeam::channel::Sender<Vec<u8>>;
+impl<'a> SocketBufferReceiver<'a> {
+    fn recv_impl<'b, F, R>(&'b mut self, f: F) -> Result<R>
+        where F: FnOnce(&'b RingBufferSync<'a, u8>) -> (usize, R) {
+        // self.recv_error_check()?;
 
-    fn deref(&self) -> &Self::Target {
-        &self.tx
+        let _old_length = self.rx_buffer.len();
+        let (size, result) = f(&self.rx_buffer);
+        self.remote_seq_no.add_assign(size);
+        if size > 0 {
+            #[cfg(any(test, feature = "verbose"))]
+            net_trace!("{}:{}:{}: rx buffer: dequeueing {} octets (now {})",
+                       self.meta.handle, self.local_endpoint, self.remote_endpoint,
+                       size, _old_length as isize - size as isize);
+        }
+        Ok(result)
+    }
+    /// Call `f` with the largest contiguous slice of octets in the receive buffer,
+    /// and dequeue the amount of elements returned by `f`.
+    ///
+    /// This function errors if the receive half of the connection is not open.
+    ///
+    /// If the receive half has been gracefully closed (with a FIN packet), `Err(Error::Finished)`
+    /// is returned. In this case, the previously received data is guaranteed to be complete.
+    ///
+    /// In all other cases, `Err(Error::Illegal)` is returned and previously received data (if any)
+    /// may be incomplete (truncated).
+    pub fn recv<'b, F, R>(&'b mut self, f: F) -> Result<R>
+        where F: FnOnce(&'b [u8]) -> (usize, R) {
+        self.recv_impl(|rx_buffer| {
+            rx_buffer.dequeue_many_with(f)
+        })
+    }
+
+    /// Dequeue a sequence of received octets, and fill a slice from it.
+    ///
+    /// This function returns the amount of octets actually dequeued, which is limited
+    /// by the amount of occupied space in the receive buffer; down to zero.
+    ///
+    /// See also [recv](#method.recv).
+    pub fn recv_slice(&mut self, data: &mut [u8]) -> Result<usize> {
+        self.recv_impl(|rx_buffer| {
+            let size = rx_buffer.dequeue_slice(data);
+            (size, size)
+        })
+    }
+
+    /// Peek at a sequence of received octets without removing them from
+    /// the receive buffer, and return a pointer to it.
+    ///
+    /// This function otherwise behaves identically to [recv](#method.recv).
+    pub fn peek(&mut self, size: usize) -> Result<&[u8]> {
+        // self.recv_error_check()?;
+
+        let buffer = self.rx_buffer.get_allocated(0, size);
+        if !buffer.is_empty() {
+            #[cfg(any(test, feature = "verbose"))]
+            net_trace!("{}:{}:{}: rx buffer: peeking at {} octets",
+                       self.meta.handle, self.local_endpoint, self.remote_endpoint,
+                       buffer.len());
+        }
+        Ok(buffer)
+    }
+
+    /// Peek at a sequence of received octets without removing them from
+    /// the receive buffer, and fill a slice from it.
+    ///
+    /// This function otherwise behaves identically to [recv_slice](#method.recv_slice).
+    pub fn peek_slice(&mut self, data: &mut [u8]) -> Result<usize> {
+        let buffer = self.peek(data.len())?;
+        let data = &mut data[..buffer.len()];
+        data.copy_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    /// Return the amount of octets queued in the receive buffer. This value can be larger than
+    /// the slice read by the next `recv` or `peek` call because it includes all queued octets,
+    /// and not only the octets that may be returned as a contiguous slice.
+    ///
+    /// Note that the Berkeley sockets interface does not have an equivalent of this API.
+    pub fn recv_queue(&self) -> usize {
+        self.rx_buffer.len()
     }
 }
+
 /// A ring buffer.
 ///
 /// This ring buffer implementation provides many ways to interact with it:
@@ -355,7 +404,6 @@ impl<'a, T: 'a> RingBufferSync<'a, T> {
     // #[must_use]
     pub fn write_unallocated(&self, offset: usize, data: &[T]) -> usize
         where T: Copy {
-        net_debug!("write unallocated {} {}", offset, data.len());
         let (size_1, offset, data) = {
             let slice = self.get_unallocated(offset, data.len());
             let slice_len = slice.len();
@@ -376,7 +424,6 @@ impl<'a, T: 'a> RingBufferSync<'a, T> {
     /// # Panics
     /// Panics if the number of elements given exceeds the number of unallocated elements.
     pub fn enqueue_unallocated(&self, count: usize) {
-        net_debug!("Enqueue unallocated {}", count);
         assert!(count <= self.window());
         self.length.fetch_add(count, Ordering::AcqRel);
     }
@@ -404,7 +451,6 @@ impl<'a, T: 'a> RingBufferSync<'a, T> {
     // #[must_use]
     pub fn read_allocated(&self, offset: usize, data: &mut [T]) -> usize
         where T: Copy {
-        net_debug!("read allocated {} {}", offset, data.len());
         let (size_1, offset, data) = {
             let slice = self.get_allocated(offset, data.len());
             data[..slice.len()].copy_from_slice(slice);
@@ -423,7 +469,6 @@ impl<'a, T: 'a> RingBufferSync<'a, T> {
     /// # Panics
     /// Panics if the number of elements given exceeds the number of allocated elements.
     pub fn dequeue_allocated(&self, count: usize) {
-        net_debug!("Dequeue allocated {}", count);
         assert!(count <= self.len());
         self.length.fetch_sub(count, Ordering::AcqRel);
         self.read_at.store(self.get_idx(count), Ordering::Release);

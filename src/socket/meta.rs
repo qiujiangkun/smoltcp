@@ -6,7 +6,7 @@ use crate::time::{Duration, Instant};
 ///
 /// This enum tracks whether the socket should be polled based on the neighbor it is
 /// going to send packets to.
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 enum NeighborState {
     /// Socket can be polled immediately.
@@ -29,7 +29,7 @@ impl Default for NeighborState {
 ///
 /// This includes things that only external (to the socket, that is) code
 /// is interested in, but which are more conveniently stored inside the socket itself.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Copy, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Meta {
     /// Handle of this socket within its enclosing `SocketSet`.

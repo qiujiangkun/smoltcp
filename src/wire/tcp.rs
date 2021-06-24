@@ -58,6 +58,7 @@ impl ops::Sub for SeqNumber {
         }
         result as usize
     }
+
 }
 
 impl cmp::PartialOrd for SeqNumber {
@@ -66,11 +67,69 @@ impl cmp::PartialOrd for SeqNumber {
     }
 }
 
+/// A TCP sequence number.
+///
+/// A sequence number is a monotonically advancing integer modulo 2<sup>32</sup>.
+/// Sequence numbers do not have a discontiguity when compared pairwise across a signed overflow.
+#[derive(Debug, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct AtomicSeqNumber(pub AtomicI32);
+impl AtomicSeqNumber {
+    pub fn to_raw(&self) -> SeqNumber {
+        SeqNumber(self.0.load(Ordering::Acquire))
+    }
+
+    pub fn add(&self, rhs: usize) -> AtomicSeqNumber {
+        if rhs > i32::MAX as usize {
+            panic!("attempt to add to sequence number with unsigned overflow")
+        }
+        AtomicSeqNumber(AtomicI32::new(self.0.load(Ordering::Acquire).wrapping_add(rhs as i32)))
+    }
+
+    pub fn sub(&self, rhs: usize) -> AtomicSeqNumber {
+        if rhs > i32::MAX as usize {
+            panic!("attempt to subtract to sequence number with unsigned overflow")
+        }
+        AtomicSeqNumber(AtomicI32::new(self.0.load(Ordering::Acquire).wrapping_sub(rhs as i32)))
+    }
+
+    pub fn sub_self(&self, rhs: AtomicSeqNumber) -> usize {
+        let result = self.0.load(Ordering::Acquire).wrapping_sub(rhs.0.load(Ordering::Acquire));
+        if result < 0 {
+            panic!("attempt to subtract sequence numbers with underflow")
+        }
+        result as usize
+    }
+    pub fn add_assign(&self, rhs: usize) {
+        if rhs > i32::MAX as usize {
+            panic!("attempt to add to sequence number with unsigned overflow")
+        }
+        self.0.fetch_add(rhs as i32, Ordering::AcqRel);
+    }
+}
+impl PartialEq for AtomicSeqNumber {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.load(Ordering::Acquire).eq(&other.0.load(Ordering::Acquire))
+    }
+}
+
+impl Eq for AtomicSeqNumber {}
+
+impl PartialOrd for AtomicSeqNumber {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        self.0.load(Ordering::Acquire).wrapping_sub(other.0.load(Ordering::Acquire)).partial_cmp(&0)
+    }
+}
+impl Clone for AtomicSeqNumber {
+    fn clone(&self) -> Self {
+        AtomicSeqNumber(AtomicI32::new(self.0.load(Ordering::Acquire)))
+    }
+}
 /// A read/write wrapper around a Transmission Control Protocol packet buffer.
 #[derive(Debug, PartialEq, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Packet<T: AsRef<[u8]>> {
-    buffer: T
+    buffer: T,
 }
 
 mod field {
@@ -80,12 +139,12 @@ mod field {
 
     pub const SRC_PORT: Field = 0..2;
     pub const DST_PORT: Field = 2..4;
-    pub const SEQ_NUM:  Field = 4..8;
-    pub const ACK_NUM:  Field = 8..12;
-    pub const FLAGS:    Field = 12..14;
+    pub const SEQ_NUM: Field = 4..8;
+    pub const ACK_NUM: Field = 8..12;
+    pub const FLAGS: Field = 12..14;
     pub const WIN_SIZE: Field = 14..16;
     pub const CHECKSUM: Field = 16..18;
-    pub const URGENT:   Field = 18..20;
+    pub const URGENT: Field = 18..20;
 
     pub fn OPTIONS(length: u8) -> Field {
         URGENT.end..(length as usize)
@@ -99,14 +158,14 @@ mod field {
     pub const FLG_URG: u16 = 0x020;
     pub const FLG_ECE: u16 = 0x040;
     pub const FLG_CWR: u16 = 0x080;
-    pub const FLG_NS:  u16 = 0x100;
+    pub const FLG_NS: u16 = 0x100;
 
     pub const OPT_END: u8 = 0x00;
     pub const OPT_NOP: u8 = 0x01;
     pub const OPT_MSS: u8 = 0x02;
-    pub const OPT_WS:  u8 = 0x03;
+    pub const OPT_WS: u8 = 0x03;
     pub const OPT_SACKPERM: u8 = 0x04;
-    pub const OPT_SACKRNG:  u8 = 0x05;
+    pub const OPT_SACKRNG: u8 = 0x05;
 }
 
 impl<T: AsRef<[u8]>> Packet<T> {
@@ -331,7 +390,7 @@ impl<T: AsRef<[u8]>> Packet<T> {
     /// # Fuzzing
     /// This function always returns `true` when fuzzing.
     pub fn verify_checksum(&self, src_addr: &IpAddress, dst_addr: &IpAddress) -> bool {
-        if cfg!(fuzzing) { return true }
+        if cfg!(fuzzing) { return true; }
 
         let data = self.buffer.as_ref();
         checksum::combine(&[
@@ -560,7 +619,7 @@ pub enum TcpOption<'a> {
     WindowScale(u8),
     SackPermitted,
     SackRange([Option<(u32, u32)>; 3]),
-    Unknown { kind: u8, data: &'a [u8] }
+    Unknown { kind: u8, data: &'a [u8] },
 }
 
 impl<'a> TcpOption<'a> {
@@ -595,8 +654,8 @@ impl<'a> TcpOption<'a> {
                     (field::OPT_SACKPERM, _) =>
                         return Err(Error::Malformed),
                     (field::OPT_SACKRNG, n) => {
-                        if n < 10 || (n-2) % 8 != 0 {
-                            return Err(Error::Malformed)
+                        if n < 10 || (n - 2) % 8 != 0 {
+                            return Err(Error::Malformed);
                         }
                         if n > 26 {
                             // It's possible for a remote to send 4 SACK blocks, but extremely rare.
@@ -630,7 +689,7 @@ impl<'a> TcpOption<'a> {
                             };
                         });
                         option = TcpOption::SackRange(sack_ranges);
-                    },
+                    }
                     (_, _) =>
                         option = TcpOption::Unknown { kind, data }
                 }
@@ -655,18 +714,18 @@ impl<'a> TcpOption<'a> {
         let length;
         match *self {
             TcpOption::EndOfList => {
-                length    = 1;
+                length = 1;
                 // There may be padding space which also should be initialized.
                 for p in buffer.iter_mut() {
                     *p = field::OPT_END;
                 }
             }
             TcpOption::NoOperation => {
-                length    = 1;
+                length = 1;
                 buffer[0] = field::OPT_NOP;
             }
             _ => {
-                length    = self.buffer_len();
+                length = self.buffer_len();
                 buffer[1] = length as u8;
                 match self {
                     &TcpOption::EndOfList |
@@ -689,7 +748,7 @@ impl<'a> TcpOption<'a> {
                             let (first, second) = *s.as_ref().unwrap();
                             let pos = i * 8 + 2;
                             NetworkEndian::write_u32(&mut buffer[pos..], first);
-                            NetworkEndian::write_u32(&mut buffer[pos+4..], second);
+                            NetworkEndian::write_u32(&mut buffer[pos + 4..], second);
                         });
                     }
                     &TcpOption::Unknown { kind, data: provided } => {
@@ -711,7 +770,7 @@ pub enum Control {
     Psh,
     Syn,
     Fin,
-    Rst
+    Rst,
 }
 
 #[allow(clippy::len_without_is_empty)]
@@ -719,7 +778,7 @@ impl Control {
     /// Return the length of a control flag, in terms of sequence space.
     pub fn len(self) -> usize {
         match self {
-            Control::Syn | Control::Fin  => 1,
+            Control::Syn | Control::Fin => 1,
             _ => 0
         }
     }
@@ -737,44 +796,44 @@ impl Control {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Repr<'a> {
-    pub src_port:     u16,
-    pub dst_port:     u16,
-    pub control:      Control,
-    pub seq_number:   SeqNumber,
-    pub ack_number:   Option<SeqNumber>,
-    pub window_len:   u16,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub control: Control,
+    pub seq_number: SeqNumber,
+    pub ack_number: Option<SeqNumber>,
+    pub window_len: u16,
     pub window_scale: Option<u8>,
     pub max_seg_size: Option<u16>,
     pub sack_permitted: bool,
-    pub sack_ranges:  [Option<(u32, u32)>; 3],
-    pub payload:      &'a [u8]
+    pub sack_ranges: [Option<(u32, u32)>; 3],
+    pub payload: &'a [u8],
 }
 
 impl<'a> Repr<'a> {
     /// Parse a Transmission Control Protocol packet and return a high-level representation.
     pub fn parse<T>(packet: &Packet<&'a T>, src_addr: &IpAddress, dst_addr: &IpAddress,
                     checksum_caps: &ChecksumCapabilities) -> Result<Repr<'a>>
-            where T: AsRef<[u8]> + ?Sized {
+        where T: AsRef<[u8]> + ?Sized {
         // Source and destination ports must be present.
-        if packet.src_port() == 0 { return Err(Error::Malformed) }
-        if packet.dst_port() == 0 { return Err(Error::Malformed) }
+        if packet.src_port() == 0 { return Err(Error::Malformed); }
+        if packet.dst_port() == 0 { return Err(Error::Malformed); }
         // Valid checksum is expected.
         if checksum_caps.tcp.rx() && !packet.verify_checksum(src_addr, dst_addr) {
-            return Err(Error::Checksum)
+            return Err(Error::Checksum);
         }
 
         let control =
             match (packet.syn(), packet.fin(), packet.rst(), packet.psh()) {
                 (false, false, false, false) => Control::None,
-                (false, false, false, true)  => Control::Psh,
-                (true,  false, false, _)     => Control::Syn,
-                (false, true,  false, _)     => Control::Fin,
-                (false, false, true , _)     => Control::Rst,
+                (false, false, false, true) => Control::Psh,
+                (true, false, false, _) => Control::Syn,
+                (false, true, false, _) => Control::Fin,
+                (false, false, true, _) => Control::Rst,
                 _ => return Err(Error::Malformed)
             };
         let ack_number =
             match packet.ack() {
-                true  => Some(packet.ack_number()),
+                true => Some(packet.ack_number()),
                 false => None
             };
         // The PSH flag is ignored.
@@ -805,7 +864,7 @@ impl<'a> Repr<'a> {
                     } else {
                         Some(value)
                     };
-                },
+                }
                 TcpOption::SackPermitted =>
                     sack_permitted = true,
                 TcpOption::SackRange(slice) =>
@@ -816,17 +875,17 @@ impl<'a> Repr<'a> {
         }
 
         Ok(Repr {
-            src_port:     packet.src_port(),
-            dst_port:     packet.dst_port(),
-            control:      control,
-            seq_number:   packet.seq_number(),
-            ack_number:   ack_number,
-            window_len:   packet.window_len(),
+            src_port: packet.src_port(),
+            dst_port: packet.dst_port(),
+            control: control,
+            seq_number: packet.seq_number(),
+            ack_number: ack_number,
+            window_len: packet.window_len(),
             window_scale: window_scale,
             max_seg_size: max_seg_size,
             sack_permitted: sack_permitted,
-            sack_ranges:   sack_ranges,
-            payload:      packet.payload()
+            sack_ranges: sack_ranges,
+            payload: packet.payload(),
         })
     }
 
@@ -847,7 +906,7 @@ impl<'a> Repr<'a> {
         }
         let sack_range_len: usize = self.sack_ranges.iter().map(
             |o| o.map(|_| 8).unwrap_or(0)
-            ).sum();
+        ).sum();
         if sack_range_len > 0 {
             length += sack_range_len + 2;
         }
@@ -873,7 +932,7 @@ impl<'a> Repr<'a> {
     /// Emit a high-level representation into a Transmission Control Protocol packet.
     pub fn emit<T>(&self, packet: &mut Packet<&mut T>, src_addr: &IpAddress, dst_addr: &IpAddress,
                    checksum_caps: &ChecksumCapabilities)
-            where T: AsRef<[u8]> + AsMut<[u8]> + ?Sized {
+        where T: AsRef<[u8]> + AsMut<[u8]> + ?Sized {
         packet.set_src_port(self.src_port);
         packet.set_dst_port(self.dst_port);
         packet.set_seq_number(self.seq_number);
@@ -883,24 +942,28 @@ impl<'a> Repr<'a> {
         packet.clear_flags();
         match self.control {
             Control::None => (),
-            Control::Psh  => packet.set_psh(true),
-            Control::Syn  => packet.set_syn(true),
-            Control::Fin  => packet.set_fin(true),
-            Control::Rst  => packet.set_rst(true)
+            Control::Psh => packet.set_psh(true),
+            Control::Syn => packet.set_syn(true),
+            Control::Fin => packet.set_fin(true),
+            Control::Rst => packet.set_rst(true)
         }
         packet.set_ack(self.ack_number.is_some());
         {
             let mut options = packet.options_mut();
             if let Some(value) = self.max_seg_size {
-                let tmp = options; options = TcpOption::MaxSegmentSize(value).emit(tmp);
+                let tmp = options;
+                options = TcpOption::MaxSegmentSize(value).emit(tmp);
             }
             if let Some(value) = self.window_scale {
-                let tmp = options; options = TcpOption::WindowScale(value).emit(tmp);
+                let tmp = options;
+                options = TcpOption::WindowScale(value).emit(tmp);
             }
             if self.sack_permitted {
-                let tmp = options; options = TcpOption::SackPermitted.emit(tmp);
+                let tmp = options;
+                options = TcpOption::SackPermitted.emit(tmp);
             } else if self.ack_number.is_some() && self.sack_ranges.iter().any(|s| s.is_some()) {
-                let tmp = options; options = TcpOption::SackRange(self.sack_ranges).emit(tmp);
+                let tmp = options;
+                options = TcpOption::SackRange(self.sack_ranges).emit(tmp);
             }
 
             if !options.is_empty() {
@@ -928,7 +991,7 @@ impl<'a> Repr<'a> {
     pub fn is_empty(&self) -> bool {
         match self.control {
             _ if !self.payload.is_empty() => false,
-            Control::Syn  | Control::Fin | Control::Rst => false,
+            Control::Syn | Control::Fin | Control::Rst => false,
             Control::None | Control::Psh => true
         }
     }
@@ -945,7 +1008,7 @@ impl<'a, T: AsRef<[u8]> + ?Sized> fmt::Display for Packet<&'a T> {
         if self.psh() { write!(f, " psh")? }
         if self.ece() { write!(f, " ece")? }
         if self.cwr() { write!(f, " cwr")? }
-        if self.ns()  { write!(f, " ns" )? }
+        if self.ns() { write!(f, " ns")? }
         write!(f, " seq={}", self.seq_number())?;
         if self.ack() {
             write!(f, " ack={}", self.ack_number())?;
@@ -1008,12 +1071,13 @@ impl<'a> fmt::Display for Repr<'a> {
 }
 
 use crate::wire::pretty_print::{PrettyPrint, PrettyIndent};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 impl<T: AsRef<[u8]>> PrettyPrint for Packet<T> {
     fn pretty_print(buffer: &dyn AsRef<[u8]>, f: &mut fmt::Formatter,
                     indent: &mut PrettyIndent) -> fmt::Result {
         match Packet::new_checked(buffer) {
-            Err(err)   => write!(f, "{}({})", indent, err),
+            Err(err) => write!(f, "{}({})", indent, err),
             Ok(packet) => write!(f, "{}{}", indent, packet)
         }
     }
@@ -1033,12 +1097,12 @@ mod test {
     #[cfg(feature = "proto-ipv4")]
     static PACKET_BYTES: [u8; 28] =
         [0xbf, 0x00, 0x00, 0x50,
-         0x01, 0x23, 0x45, 0x67,
-         0x89, 0xab, 0xcd, 0xef,
-         0x60, 0x35, 0x01, 0x23,
-         0x01, 0xb6, 0x02, 0x01,
-         0x03, 0x03, 0x0c, 0x01,
-         0xaa, 0x00, 0x00, 0xff];
+            0x01, 0x23, 0x45, 0x67,
+            0x89, 0xab, 0xcd, 0xef,
+            0x60, 0x35, 0x01, 0x23,
+            0x01, 0xb6, 0x02, 0x01,
+            0x03, 0x03, 0x0c, 0x01,
+            0xaa, 0x00, 0x00, 0xff];
 
     #[cfg(feature = "proto-ipv4")]
     static OPTION_BYTES: [u8; 4] =
@@ -1115,26 +1179,26 @@ mod test {
     #[cfg(feature = "proto-ipv4")]
     static SYN_PACKET_BYTES: [u8; 24] =
         [0xbf, 0x00, 0x00, 0x50,
-         0x01, 0x23, 0x45, 0x67,
-         0x00, 0x00, 0x00, 0x00,
-         0x50, 0x02, 0x01, 0x23,
-         0x7a, 0x8d, 0x00, 0x00,
-         0xaa, 0x00, 0x00, 0xff];
+            0x01, 0x23, 0x45, 0x67,
+            0x00, 0x00, 0x00, 0x00,
+            0x50, 0x02, 0x01, 0x23,
+            0x7a, 0x8d, 0x00, 0x00,
+            0xaa, 0x00, 0x00, 0xff];
 
     #[cfg(feature = "proto-ipv4")]
     fn packet_repr() -> Repr<'static> {
         Repr {
-            src_port:     48896,
-            dst_port:     80,
-            seq_number:   SeqNumber(0x01234567),
-            ack_number:   None,
-            window_len:   0x0123,
+            src_port: 48896,
+            dst_port: 80,
+            seq_number: SeqNumber(0x01234567),
+            ack_number: None,
+            window_len: 0x0123,
             window_scale: None,
-            control:      Control::Syn,
+            control: Control::Syn,
             max_seg_size: None,
             sack_permitted: false,
-            sack_ranges:  [None, None, None],
-            payload:      &PAYLOAD_BYTES
+            sack_ranges: [None, None, None],
+            payload: &PAYLOAD_BYTES,
         }
     }
 

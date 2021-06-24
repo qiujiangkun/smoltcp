@@ -215,6 +215,7 @@ pub use self::udp::{Packet as UdpPacket,
                     HEADER_LEN as UDP_HEADER_LEN};
 
 pub use self::tcp::{SeqNumber as TcpSeqNumber,
+                    AtomicSeqNumber as AtomicTcpSeqNumber,
                     Packet as TcpPacket,
                     TcpOption,
                     Repr as TcpRepr,
