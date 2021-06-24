@@ -15,6 +15,8 @@ use crate::socket::WakerRegistration;
 use crate::wire::{IpProtocol, IpRepr, IpAddress, IpEndpoint, TcpSeqNumber, TcpRepr, TcpControl};
 use crossbeam::atomic::AtomicCell;
 use std::sync::Arc;
+use std::io::Cursor;
+use crossbeam::channel::TryRecvError;
 
 /// A TCP socket ring buffer.
 pub type SocketBuffer<'a> = RingBuffer<'a, u8>;
@@ -359,7 +361,7 @@ pub struct TcpSocket<'a> {
 
     read_buffer: Option<SocketBufferSender>,
     write_buffer: Option<SocketBufferReceiver>,
-
+    temp_write_value: Option<Cursor<Vec<u8>>>
 }
 
 const DEFAULT_MSS: usize = 536;
@@ -420,6 +422,7 @@ impl<'a> TcpSocket<'a> {
             tx_waker: WakerRegistration::new(),
             read_buffer: None,
             write_buffer: None,
+            temp_write_value: None
         }
     }
 
@@ -1003,13 +1006,38 @@ impl<'a> TcpSocket<'a> {
         self.read_buffer = Some(tx);
         rx
     }
-    pub fn sync_write_buffer(&mut self) {
-        if let Some(buf) = self.write_buffer.as_mut() {
-            if let Ok(buf) = buf.try_recv() {
-                let x = self.tx_buffer.enqueue_slice(&buf);
-                assert_eq!(x, buf.len(), "Writing too fast. Cache is not implemented yet")
+    pub fn sync_write_buffer(&mut self) -> Result<()> {
+        if let Some(rx) = self.write_buffer.as_mut() {
+            let buf = if let Some(last) = self.temp_write_value.take() {
+                Some(last)
+            } else {
+                match rx.try_recv() {
+                    Ok(data) => Some(Cursor::new(data)),
+                    Err(TryRecvError::Disconnected) => {
+                        unreachable!()
+                    }
+                    Err(TryRecvError::Empty) => None,
+                }
+            };
+            if let Some(mut buf) = buf {
+                match self.send_slice(&buf.get_ref().as_slice()[..buf.position() as usize]) {
+                    Ok(enqueued) if enqueued == buf.get_ref().len() => {
+
+                    }
+                    Ok(enqueued)  => {
+                        buf.set_position(buf.position() + enqueued as u64);
+                        self.temp_write_value = Some(buf);
+                    }
+                    Err(Error::Exhausted) => {
+                        self.temp_write_value = Some(buf);
+                    }
+                    Err(e) => {
+                        return Err(e)
+                    }
+                }
             }
         }
+        Ok(())
     }
     pub fn sync_read_buffer(&mut self) {
         if self.read_buffer.is_some() {
@@ -1493,7 +1521,6 @@ impl<'a> TcpSocket<'a> {
                     self.timer.set_for_idle(timestamp, self.keep_alive);
                 }
             }
-
             _ => {
                 net_debug!("{}:{}:{}: unexpected packet {}",
                            self.meta.handle, self.local_endpoint, self.remote_endpoint, repr);
@@ -1516,7 +1543,7 @@ impl<'a> TcpSocket<'a> {
                        ack_len, self.tx_buffer.len() - ack_len);
             self.tx_buffer.dequeue_allocated(ack_len);
 
-            self.sync_write_buffer();
+            self.sync_write_buffer()?;
 
             // There's new room available in tx_buffer, wake the waiting task if any.
             #[cfg(feature = "async")]
@@ -1718,7 +1745,7 @@ impl<'a> TcpSocket<'a> {
                               emit: F) -> Result<()>
         where F: FnOnce((IpRepr, TcpRepr)) -> Result<()> {
         if !self.remote_endpoint.is_specified() { return Err(Error::Exhausted); }
-        self.sync_write_buffer();
+        self.sync_write_buffer()?;
 
         if self.remote_last_ts.is_none() {
             // We get here in exactly two cases:
@@ -1971,7 +1998,7 @@ impl<'a> TcpSocket<'a> {
             // Socket was aborted, we have an RST packet to transmit.
             PollAt::Now
         } else if self.seq_to_transmit() {
-            // We have a data or flag packet to transmit.
+            // We have a data or flagsocket packet to transmit.
             PollAt::Now
         } else {
             let want_ack = self.ack_to_transmit() || self.window_to_update();
@@ -2153,7 +2180,7 @@ mod test {
     macro_rules! sanity {
         ($socket1:expr, $socket2:expr) => ({
             let (s1, s2) = ($socket1, $socket2);
-            assert_eq!(s1.state,            s2.state,           "state");
+            assert_eq!(s1.state.load(),     s2.state.load(),    "state");
             assert_eq!(s1.listen_address,   s2.listen_address,  "listen_address");
             assert_eq!(s1.local_endpoint,   s2.local_endpoint,  "local_endpoint");
             assert_eq!(s1.remote_endpoint,  s2.remote_endpoint, "remote_endpoint");
@@ -2260,7 +2287,7 @@ mod test {
     }
 
     fn socket_fin_wait_1() -> TcpSocket<'static> {
-        let mut s = socket_established();
+        let s = socket_established();
         s.state.store( State::FinWait1) ;
         s
     }
@@ -2301,7 +2328,7 @@ mod test {
     }
 
     fn socket_last_ack() -> TcpSocket<'static> {
-        let mut s = socket_close_wait();
+        let s = socket_close_wait();
         s.state.store(State::LastAck);
         s
     }
@@ -2329,7 +2356,7 @@ mod test {
     #[test]
     fn test_closed_reject() {
         let s = socket();
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
 
         let tcp_repr = TcpRepr {
             control: TcpControl::Syn,
@@ -2355,7 +2382,7 @@ mod test {
     fn test_closed_close() {
         let mut s = socket();
         s.close();
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
     }
 
     // =========================================================================================//
@@ -2490,7 +2517,7 @@ mod test {
         };
         assert!(!s.accepts(&SEND_IP_TEMPL, &tcp_repr));
 
-        assert_eq!(s.state, State::Listen);
+        assert_eq!(s.state.load(), State::Listen);
     }
 
     #[test]
@@ -2508,7 +2535,7 @@ mod test {
     fn test_listen_close() {
         let mut s = socket_listen();
         s.close();
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
     }
 
     // =========================================================================================//
@@ -2530,7 +2557,7 @@ mod test {
             ack_number: Some(LOCAL_SEQ + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::Established);
+        assert_eq!(s.state.load(), State::Established);
         sanity!(s, socket_established());
     }
 
@@ -2557,7 +2584,7 @@ mod test {
             window_len: 58,
             ..RECV_TEMPL
         }]);
-        assert_eq!(s.state, State::CloseWait);
+        assert_eq!(s.state.load(), State::CloseWait);
         sanity!(s, TcpSocket {
             remote_last_ack: Some(REMOTE_SEQ + 1 + 6 + 1),
             remote_last_win: 58,
@@ -2581,7 +2608,7 @@ mod test {
             ack_number: Some(LOCAL_SEQ),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::Listen);
+        assert_eq!(s.state.load(), State::Listen);
         assert_eq!(s.local_endpoint, IpEndpoint::new(IpAddress::Unspecified, LOCAL_END.port));
         assert_eq!(s.remote_endpoint, IpEndpoint::default());
     }
@@ -2651,7 +2678,7 @@ mod test {
     fn test_syn_received_close() {
         let mut s = socket_syn_received();
         s.close();
-        assert_eq!(s.state, State::FinWait1);
+        assert_eq!(s.state.load(), State::FinWait1);
     }
 
     // =========================================================================================//
@@ -2761,7 +2788,7 @@ mod test {
             ..RECV_TEMPL
         }]);
         recv!(s, time 1000, Err(Error::Exhausted));
-        assert_eq!(s.state, State::Established);
+        assert_eq!(s.state.load(), State::Established);
         sanity!(s, socket_established());
     }
 
@@ -2774,9 +2801,9 @@ mod test {
             ack_number: Some(LOCAL_SEQ + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
     }
-State::Listen
+
     #[test]
     fn test_syn_sent_rst_no_ack() {
         let mut s = socket_syn_sent();
@@ -2786,7 +2813,7 @@ State::Listen
             ack_number: None,
             ..SEND_TEMPL
         }, Err(Error::Dropped));
-        assert_eq!(s.state, State::SynSent);
+        assert_eq!(s.state.load(), State::SynSent);
     }
 
     #[test]
@@ -2798,7 +2825,7 @@ State::Listen
             ack_number: Some(TcpSeqNumber(1234)),
             ..SEND_TEMPL
         }, Err(Error::Dropped));
-        assert_eq!(s.state, State::SynSent);
+        assert_eq!(s.state.load(), State::SynSent);
     }
 
     #[test]
@@ -2809,14 +2836,14 @@ State::Listen
             ack_number: Some(TcpSeqNumber(1)),
             ..SEND_TEMPL
         }, Err(Error::Dropped));
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
     }
 
     #[test]
     fn test_syn_sent_close() {
         let mut s = socket();
         s.close();
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
     }
 
     #[test]
@@ -3136,7 +3163,7 @@ State::Listen
             ack_number: Some(REMOTE_SEQ + 1 + 1),
             ..RECV_TEMPL
         }]);
-        assert_eq!(s.state, State::CloseWait);
+        assert_eq!(s.state.load(), State::CloseWait);
         sanity!(s, socket_close_wait());
     }
 
@@ -3154,7 +3181,7 @@ State::Listen
             ack_number: Some(REMOTE_SEQ + 1),
             ..RECV_TEMPL
         })));
-        assert_eq!(s.state, State::Established);
+        assert_eq!(s.state.load(), State::Established);
         send!(s, TcpRepr {
             seq_number: REMOTE_SEQ + 1,
             ack_number: Some(LOCAL_SEQ + 1),
@@ -3166,7 +3193,7 @@ State::Listen
             window_len: 52,
             ..RECV_TEMPL
         })));
-        assert_eq!(s.state, State::Established);
+        assert_eq!(s.state.load(), State::Established);
     }
 
     #[test]
@@ -3179,7 +3206,7 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::CloseWait);
+        assert_eq!(s.state.load(), State::CloseWait);
         recv!(s, [TcpRepr {
             seq_number: LOCAL_SEQ + 1,
             ack_number: Some(REMOTE_SEQ + 1 + 1),
@@ -3197,7 +3224,7 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
     }
 
     #[test]
@@ -3209,14 +3236,14 @@ State::Listen
             ack_number: None,
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
     }
 
     #[test]
     fn test_established_close() {
         let mut s = socket_established();
         s.close();
-        assert_eq!(s.state, State::FinWait1);
+        assert_eq!(s.state.load(), State::FinWait1);
         sanity!(s, socket_fin_wait_1());
     }
 
@@ -3224,7 +3251,7 @@ State::Listen
     fn test_established_abort() {
         let mut s = socket_established();
         s.abort();
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
         recv!(s, [TcpRepr {
             control: TcpControl::Rst,
             seq_number: LOCAL_SEQ + 1,
@@ -3247,7 +3274,7 @@ State::Listen
             ..RECV_TEMPL
         })));
 
-        assert_eq!(s.state, State::Established);
+        assert_eq!(s.state.load(), State::Established);
 
         // Send something to advance seq by 1
         send!(s, TcpRepr {
@@ -3292,7 +3319,7 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1 + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::FinWait2);
+        assert_eq!(s.state.load(), State::FinWait2);
         sanity!(s, socket_fin_wait_2());
     }
 
@@ -3311,7 +3338,7 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::Closing);
+        assert_eq!(s.state.load(), State::Closing);
         sanity!(s, socket_closing());
     }
 
@@ -3332,7 +3359,7 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1 + 6),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::FinWait1);
+        assert_eq!(s.state.load(), State::FinWait1);
     }
 
     #[test]
@@ -3344,7 +3371,7 @@ State::Listen
             payload:    &b"abc"[..],
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::FinWait1);
+        assert_eq!(s.state.load(), State::FinWait1);
         s.recv(|data| {
             assert_eq!(data, b"abc");
             (3, ())
@@ -3355,7 +3382,7 @@ State::Listen
     fn test_fin_wait_1_close() {
         let mut s = socket_fin_wait_1();
         s.close();
-        assert_eq!(s.state, State::FinWait1);
+        assert_eq!(s.state.load(), State::FinWait1);
     }
 
     // =========================================================================================//
@@ -3371,7 +3398,7 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1 + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.state.load(), State::TimeWait);
         sanity!(s, socket_time_wait(false));
     }
 
@@ -3384,7 +3411,7 @@ State::Listen
             payload:    &b"abc"[..],
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::FinWait2);
+        assert_eq!(s.state.load(), State::FinWait2);
         s.recv(|data| {
             assert_eq!(data, b"abc");
             (3, ())
@@ -3400,7 +3427,7 @@ State::Listen
     fn test_fin_wait_2_close() {
         let mut s = socket_fin_wait_2();
         s.close();
-        assert_eq!(s.state, State::FinWait2);
+        assert_eq!(s.state.load(), State::FinWait2);
     }
 
     // =========================================================================================//
@@ -3420,7 +3447,7 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1 + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.state.load(), State::TimeWait);
         sanity!(s, socket_time_wait(true));
     }
 
@@ -3428,7 +3455,7 @@ State::Listen
     fn test_closing_close() {
         let mut s = socket_closing();
         s.close();
-        assert_eq!(s.state, State::Closing);
+        assert_eq!(s.state.load(), State::Closing);
     }
 
     // =========================================================================================//
@@ -3455,7 +3482,7 @@ State::Listen
     fn test_time_wait_close() {
         let mut s = socket_time_wait(false);
         s.close();
-        assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.state.load(), State::TimeWait);
     }
 
     #[test]
@@ -3487,9 +3514,9 @@ State::Listen
             ack_number: Some(REMOTE_SEQ + 1 + 1),
             ..RECV_TEMPL
         }]);
-        assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.state.load(), State::TimeWait);
         recv!(s, time 60_000, Err(Error::Exhausted));
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
     }
 
     // =========================================================================================//
@@ -3517,7 +3544,7 @@ State::Listen
     fn test_close_wait_close() {
         let mut s = socket_close_wait();
         s.close();
-        assert_eq!(s.state, State::LastAck);
+        assert_eq!(s.state.load(), State::LastAck);
         sanity!(s, socket_last_ack());
     }
 
@@ -3533,13 +3560,13 @@ State::Listen
             ack_number: Some(REMOTE_SEQ + 1 + 1),
             ..RECV_TEMPL
         }]);
-        assert_eq!(s.state, State::LastAck);
+        assert_eq!(s.state.load(), State::LastAck);
         send!(s, TcpRepr {
             seq_number: REMOTE_SEQ + 1 + 1,
             ack_number: Some(LOCAL_SEQ + 1 + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
     }
 
     #[test]
@@ -3551,7 +3578,7 @@ State::Listen
             ack_number: Some(REMOTE_SEQ + 1 + 1),
             ..RECV_TEMPL
         }]);
-        assert_eq!(s.state, State::LastAck);
+        assert_eq!(s.state.load(), State::LastAck);
 
         // ACK received that doesn't ack the FIN: socket should stay in LastAck.
         send!(s, TcpRepr {
@@ -3559,7 +3586,7 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::LastAck);
+        assert_eq!(s.state.load(), State::LastAck);
 
         // ACK received of fin: socket should change to Closed.
         send!(s, TcpRepr {
@@ -3567,14 +3594,14 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1 + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
     }
 
     #[test]
     fn test_last_ack_close() {
         let mut s = socket_last_ack();
         s.close();
-        assert_eq!(s.state, State::LastAck);
+        assert_eq!(s.state.load(), State::LastAck);
     }
 
     // =========================================================================================//
@@ -3585,7 +3612,7 @@ State::Listen
     fn test_listen() {
         let mut s = socket();
         s.listen(IpEndpoint::new(IpAddress::default(), LOCAL_PORT)).unwrap();
-        assert_eq!(s.state, State::Listen);
+        assert_eq!(s.state.load(), State::Listen);
     }
 
     #[test]
@@ -3626,14 +3653,14 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::CloseWait);
+        assert_eq!(s.state.load(), State::CloseWait);
         recv!(s, [TcpRepr {
             seq_number: LOCAL_SEQ + 1,
             ack_number: Some(REMOTE_SEQ + 1 + 1),
             ..RECV_TEMPL
         }]);
         s.close();
-        assert_eq!(s.state, State::LastAck);
+        assert_eq!(s.state.load(), State::LastAck);
         recv!(s, [TcpRepr {
             control: TcpControl::Fin,
             seq_number: LOCAL_SEQ + 1,
@@ -3645,14 +3672,14 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1 + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
     }
 
     #[test]
     fn test_local_close() {
         let mut s = socket_established();
         s.close();
-        assert_eq!(s.state, State::FinWait1);
+        assert_eq!(s.state.load(), State::FinWait1);
         recv!(s, [TcpRepr {
             control: TcpControl::Fin,
             seq_number: LOCAL_SEQ + 1,
@@ -3664,14 +3691,14 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1 + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::FinWait2);
+        assert_eq!(s.state.load(), State::FinWait2);
         send!(s, TcpRepr {
             control: TcpControl::Fin,
             seq_number: REMOTE_SEQ + 1,
             ack_number: Some(LOCAL_SEQ + 1 + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.state.load(), State::TimeWait);
         recv!(s, [TcpRepr {
             seq_number: LOCAL_SEQ + 1 + 1,
             ack_number: Some(REMOTE_SEQ + 1 + 1),
@@ -3683,7 +3710,7 @@ State::Listen
     fn test_simultaneous_close() {
         let mut s = socket_established();
         s.close();
-        assert_eq!(s.state, State::FinWait1);
+        assert_eq!(s.state.load(), State::FinWait1);
         recv!(s, [TcpRepr { // due to reordering, this is logically located...
             control: TcpControl::Fin,
             seq_number: LOCAL_SEQ + 1,
@@ -3696,7 +3723,7 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::Closing);
+        assert_eq!(s.state.load(), State::Closing);
         recv!(s, [TcpRepr {
             seq_number: LOCAL_SEQ + 1 + 1,
             ack_number: Some(REMOTE_SEQ + 1 + 1),
@@ -3708,7 +3735,7 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1 + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.state.load(), State::TimeWait);
         recv!(s, []);
     }
 
@@ -3716,7 +3743,7 @@ State::Listen
     fn test_simultaneous_close_combined_fin_ack() {
         let mut s = socket_established();
         s.close();
-        assert_eq!(s.state, State::FinWait1);
+        assert_eq!(s.state.load(), State::FinWait1);
         recv!(s, [TcpRepr {
             control: TcpControl::Fin,
             seq_number: LOCAL_SEQ + 1,
@@ -3729,7 +3756,7 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1 + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.state.load(), State::TimeWait);
         recv!(s, [TcpRepr {
             seq_number: LOCAL_SEQ + 1 + 1,
             ack_number: Some(REMOTE_SEQ + 1 + 1),
@@ -3741,7 +3768,7 @@ State::Listen
     fn test_simultaneous_close_raced() {
         let mut s = socket_established();
         s.close();
-        assert_eq!(s.state, State::FinWait1);
+        assert_eq!(s.state.load(), State::FinWait1);
 
         // Socket receives FIN before it has a chance to send its own FIN
         send!(s, TcpRepr {
@@ -3750,7 +3777,7 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::Closing);
+        assert_eq!(s.state.load(), State::Closing);
 
         // FIN + ack-of-FIN
         recv!(s, [TcpRepr {
@@ -3759,14 +3786,14 @@ State::Listen
             ack_number: Some(REMOTE_SEQ + 1 + 1),
             ..RECV_TEMPL
         }]);
-        assert_eq!(s.state, State::Closing);
+        assert_eq!(s.state.load(), State::Closing);
 
         send!(s, TcpRepr {
             seq_number: REMOTE_SEQ + 1 + 1,
             ack_number: Some(LOCAL_SEQ + 1 + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.state.load(), State::TimeWait);
         recv!(s, []);
     }
 
@@ -3775,7 +3802,7 @@ State::Listen
         let mut s = socket_established();
         s.send_slice(b"abcdef").unwrap();
         s.close();
-        assert_eq!(s.state, State::FinWait1);
+        assert_eq!(s.state.load(), State::FinWait1);
 
         // Socket receives FIN before it has a chance to send its own data+FIN
         send!(s, TcpRepr {
@@ -3784,7 +3811,7 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::Closing);
+        assert_eq!(s.state.load(), State::Closing);
 
         // data + FIN + ack-of-FIN
         recv!(s, [TcpRepr {
@@ -3794,14 +3821,14 @@ State::Listen
             payload:    &b"abcdef"[..],
             ..RECV_TEMPL
         }]);
-        assert_eq!(s.state, State::Closing);
+        assert_eq!(s.state.load(), State::Closing);
 
         send!(s, TcpRepr {
             seq_number: REMOTE_SEQ + 1 + 1,
             ack_number: Some(LOCAL_SEQ + 1 + 6 + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.state.load(), State::TimeWait);
         recv!(s, []);
     }
 
@@ -3824,7 +3851,7 @@ State::Listen
         let mut s = socket_established();
         s.send_slice(b"abcdef").unwrap();
         s.close();
-        assert_eq!(s.state, State::FinWait1);
+        assert_eq!(s.state.load(), State::FinWait1);
         recv!(s, [TcpRepr {
             control: TcpControl::Fin,
             seq_number: LOCAL_SEQ + 1,
@@ -3845,7 +3872,7 @@ State::Listen
         let mut s = socket_established();
         s.send_slice(b"abcdef").unwrap();
         s.close();
-        assert_eq!(s.state, State::FinWait1);
+        assert_eq!(s.state.load(), State::FinWait1);
         recv!(s, [TcpRepr {
             control: TcpControl::Fin,
             seq_number: LOCAL_SEQ + 1,
@@ -3858,7 +3885,7 @@ State::Listen
             ack_number: Some(LOCAL_SEQ + 1 + 6 + 1),
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::FinWait2);
+        assert_eq!(s.state.load(), State::FinWait2);
         send!(s, TcpRepr {
             control: TcpControl::Fin,
             seq_number: REMOTE_SEQ + 1,
@@ -3870,7 +3897,7 @@ State::Listen
             ack_number: Some(REMOTE_SEQ + 1 + 1),
             ..RECV_TEMPL
         }]);
-        assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.state.load(), State::TimeWait);
     }
 
     // =========================================================================================//
@@ -4510,7 +4537,7 @@ State::Listen
             payload: &[1,2,3,4],
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::CloseWait);
+        assert_eq!(s.state.load(), State::CloseWait);
 
         // we ack the FIN, with the reduced window size.
         recv!(s, Ok(TcpRepr {
@@ -4537,7 +4564,7 @@ State::Listen
             payload: &[1,2,3,4],
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.state.load(), State::TimeWait);
 
         // we ack the FIN, with the reduced window size.
         recv!(s, Ok(TcpRepr {
@@ -4778,7 +4805,7 @@ State::Listen
             sack_permitted: true,
             ..RECV_TEMPL
         }));
-        assert_eq!(s.state, State::SynSent);
+        assert_eq!(s.state.load(), State::SynSent);
         assert_eq!(s.poll_at(), PollAt::Time(Instant::from_millis(250)));
         recv!(s, time 250, Ok(TcpRepr {
             control:    TcpControl::Rst,
@@ -4787,7 +4814,7 @@ State::Listen
             window_scale: None,
             ..RECV_TEMPL
         }));
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
     }
 
     #[test]
@@ -4818,7 +4845,7 @@ State::Listen
             ack_number: Some(REMOTE_SEQ + 1),
             ..RECV_TEMPL
         }));
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
     }
 
     #[test]
@@ -4856,7 +4883,7 @@ State::Listen
             ..RECV_TEMPL
         }));
         recv!(s, time 205, Err(Error::Exhausted));
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
     }
 
     #[test]
@@ -4875,7 +4902,7 @@ State::Listen
             ack_number: Some(REMOTE_SEQ + 1),
             ..RECV_TEMPL
         }));
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
     }
 
     #[test]
@@ -4894,7 +4921,7 @@ State::Listen
             ack_number: Some(REMOTE_SEQ + 1 + 1),
             ..RECV_TEMPL
         }));
-        assert_eq!(s.state, State::Closed);
+        assert_eq!(s.state.load(), State::Closed);
     }
 
     #[test]
@@ -5120,7 +5147,7 @@ State::Listen
             payload:    &b"abc"[..],
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::Closing);
+        assert_eq!(s.state.load(), State::Closing);
         s.recv(|data| {
             assert_eq!(data, b"abc");
             (3, ())
@@ -5138,7 +5165,7 @@ State::Listen
             payload:    &b"abc"[..],
             ..SEND_TEMPL
         });
-        assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.state.load(), State::TimeWait);
         s.recv(|data| {
             assert_eq!(data, b"abc");
             (3, ())

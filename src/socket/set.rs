@@ -176,7 +176,16 @@ impl<'a> Set<'a> {
     /// Pruning affects sockets with reference count 0. Open sockets are closed.
     /// Closed sockets are removed and dropped.
     pub fn prune(&mut self) {
-        // TODO: remove old tcp sockets
+        let mut to_remove = Vec::new();
+        for (&handle, tcp_socket) in &self.tcp_sockets {
+            if tcp_socket.is_open() {
+                to_remove.push(handle);
+            }
+        }
+        for handle in to_remove {
+            self.tcp_sockets.remove(&handle);
+        }
+
         for (index, item) in self.sockets.iter_mut().enumerate() {
             let mut may_remove = false;
             if let Some(Item { refs: 0, ref mut socket }) = *item {
