@@ -106,12 +106,14 @@ impl<'a, T: 'a> RingBufferSync<'a, T> {
         (self.read_at.load(Ordering::Acquire) + idx) % self.capacity()
     }
 }
+
 trait AsMutUnsafe {
     #[allow(unsafe_code)]
     fn as_mut_unsafe(&self) -> &mut Self {
-        unsafe {&mut *(self as *const Self as *mut Self)}
+        unsafe { &mut *(self as *const Self as *mut Self) }
     }
 }
+
 impl<T: ?Sized> AsMutUnsafe for T {}
 
 /// This is the "discrete" ring buffer interface: it operates with single elements,
@@ -144,7 +146,7 @@ impl<'a, T: 'a> RingBufferSync<'a, T> {
     /// Call `f` with a single buffer element, and dequeue the element if `f`
     /// returns successfully, or return `Err(Error::Exhausted)` if the buffer is empty.
     pub fn dequeue_one_with<'b, R, F>(&'b self, f: F) -> Result<R>
-        where F: FnOnce(&'b mut T) -> Result<R> {
+        where F: FnOnce(&'b T) -> Result<R> {
         if self.is_empty() { return Err(Error::Exhausted); }
 
         let next_at = self.get_idx_unchecked(1);
@@ -162,7 +164,7 @@ impl<'a, T: 'a> RingBufferSync<'a, T> {
     /// or return `Err(Error::Exhausted)` if the buffer is empty.
     ///
     /// This function is a shortcut for `ring_buf.dequeue_one_with(Ok)`.
-    pub fn dequeue_one(&self) -> Result<&mut T> {
+    pub fn dequeue_one(&self) -> Result<&T> {
         self.dequeue_one_with(Ok)
     }
 }
@@ -230,7 +232,7 @@ impl<'a, T: 'a> RingBufferSync<'a, T> {
     /// This function panics if the amount of elements returned by `f` is larger
     /// than the size of the slice passed into it.
     pub fn dequeue_many_with<'b, R, F>(&'b self, f: F) -> (usize, R)
-        where F: FnOnce(&'b mut [T]) -> (usize, R) {
+        where F: FnOnce(&'b [T]) -> (usize, R) {
         let capacity = self.capacity();
         let max_size = cmp::min(self.len(), capacity - self.read_at.load(Ordering::Acquire));
         let (size, result) = f(self.storage[self.read_at.load(Ordering::Acquire)..self.read_at.load(Ordering::Acquire) + max_size].as_mut_unsafe());
@@ -250,10 +252,10 @@ impl<'a, T: 'a> RingBufferSync<'a, T> {
     /// This function may return a slice smaller than the given size
     /// if the allocated space in the buffer is not contiguous.
     // #[must_use]
-    pub fn dequeue_many(&self, size: usize) -> &mut [T] {
+    pub fn dequeue_many(&self, size: usize) -> &[T] {
         self.dequeue_many_with(|buf| {
             let size = cmp::min(size, buf.len());
-            (size, &mut buf[..size])
+            (size, &buf[..size])
         }).1
     }
 
@@ -302,6 +304,7 @@ impl<'a, T: 'a> RingBufferSync<'a, T> {
     // #[must_use]
     pub fn write_unallocated(&self, offset: usize, data: &[T]) -> usize
         where T: Copy {
+        net_debug!("write unallocated {} {}", offset, data.len());
         let (size_1, offset, data) = {
             let slice = self.get_unallocated(offset, data.len());
             let slice_len = slice.len();
@@ -322,6 +325,7 @@ impl<'a, T: 'a> RingBufferSync<'a, T> {
     /// # Panics
     /// Panics if the number of elements given exceeds the number of unallocated elements.
     pub fn enqueue_unallocated(&self, count: usize) {
+        net_debug!("Enqueue unallocated {}", count);
         assert!(count <= self.window());
         self.length.fetch_add(count, Ordering::AcqRel);
     }
@@ -332,9 +336,9 @@ impl<'a, T: 'a> RingBufferSync<'a, T> {
     pub fn get_allocated(&self, offset: usize, mut size: usize) -> &[T] {
         let start_at = self.get_idx(offset);
         // We can't read past the end of the allocated data.
-        if offset > self.length.load(Ordering::Acquire)  { return &mut []; }
+        if offset > self.length.load(Ordering::Acquire) { return &mut []; }
         // We can't read more than we have allocated.
-        let clamped_length = self.length.load(Ordering::Acquire)  - offset;
+        let clamped_length = self.length.load(Ordering::Acquire) - offset;
         if size > clamped_length { size = clamped_length }
         // We can't contiguously dequeue past the end of the storage.
         let until_end = self.capacity() - start_at;
@@ -349,6 +353,7 @@ impl<'a, T: 'a> RingBufferSync<'a, T> {
     // #[must_use]
     pub fn read_allocated(&self, offset: usize, data: &mut [T]) -> usize
         where T: Copy {
+        net_debug!("read allocated {} {}", offset, data.len());
         let (size_1, offset, data) = {
             let slice = self.get_allocated(offset, data.len());
             data[..slice.len()].copy_from_slice(slice);
@@ -367,6 +372,7 @@ impl<'a, T: 'a> RingBufferSync<'a, T> {
     /// # Panics
     /// Panics if the number of elements given exceeds the number of allocated elements.
     pub fn dequeue_allocated(&self, count: usize) {
+        net_debug!("Dequeue allocated {}", count);
         assert!(count <= self.len());
         self.length.fetch_sub(count, Ordering::AcqRel);
         self.read_at.store(self.get_idx(count), Ordering::Release);
@@ -487,10 +493,10 @@ mod test {
         assert_eq!(&ring.storage[..], b"abcdefgh....");
 
         for _ in 0..4 {
-            *ring.dequeue_one().unwrap() = b'.';
+            let _ = ring.dequeue_one();
         }
         assert_eq!(ring.len(), 4);
-        assert_eq!(&ring.storage[..], b"....efgh....");
+        assert_eq!(&ring.storage[..], b"abcdefgh....");
 
         ring.enqueue_many_with(|buf| {
             assert_eq!(buf.len(), 12 - 8);
@@ -498,7 +504,7 @@ mod test {
             (4, ())
         });
         assert_eq!(ring.len(), 8);
-        assert_eq!(&ring.storage[..], b"....efghijkl");
+        assert_eq!(&ring.storage[..], b"abcdefghijkl");
 
         ring.enqueue_many_with(|buf| {
             assert_eq!(buf.len(), 4);
@@ -509,10 +515,10 @@ mod test {
         assert_eq!(&ring.storage[..], b"abcdefghijkl");
 
         for _ in 0..4 {
-            *ring.dequeue_one().unwrap() = b'.';
+            let _ = ring.dequeue_one();
         }
         assert_eq!(ring.len(), 8);
-        assert_eq!(&ring.storage[..], b"abcd....ijkl");
+        assert_eq!(&ring.storage[..], b"abcdefghijkl");
     }
 
     #[test]
@@ -537,77 +543,12 @@ mod test {
         assert_eq!(&ring.storage[..], b"abcdefgh....");
 
         for _ in 0..4 {
-            *ring.dequeue_one().unwrap() = b'.';
+            let _ = ring.dequeue_one();
         }
-        assert_eq!(ring.len(), 4);
-        assert_eq!(&ring.storage[..], b"....efgh....");
 
         assert_eq!(ring.enqueue_slice(b"ijklabcd"), 8);
         assert_eq!(ring.len(), 12);
         assert_eq!(&ring.storage[..], b"abcdefghijkl");
-    }
-
-    #[test]
-    fn test_buffer_dequeue_many_with() {
-        let ring = RingBufferSync::new(vec![b'.'; 12]);
-
-        assert_eq!(ring.enqueue_slice(b"abcdefghijkl"), 12);
-
-        assert_eq!(ring.dequeue_many_with(|buf| {
-            assert_eq!(buf.len(), 12);
-            assert_eq!(buf, b"abcdefghijkl");
-            buf[..4].copy_from_slice(b"....");
-            (4, true)
-        }), (4, true));
-        assert_eq!(ring.len(), 8);
-        assert_eq!(&ring.storage[..], b"....efghijkl");
-
-        ring.dequeue_many_with(|buf| {
-            assert_eq!(buf, b"efghijkl");
-            buf[..4].copy_from_slice(b"....");
-            (4, ())
-        });
-        assert_eq!(ring.len(), 4);
-        assert_eq!(&ring.storage[..], b"........ijkl");
-
-        assert_eq!(ring.enqueue_slice(b"abcd"), 4);
-        assert_eq!(ring.len(), 8);
-
-        ring.dequeue_many_with(|buf| {
-            assert_eq!(buf, b"ijkl");
-            buf[..4].copy_from_slice(b"....");
-            (4, ())
-        });
-        ring.dequeue_many_with(|buf| {
-            assert_eq!(buf, b"abcd");
-            buf[..4].copy_from_slice(b"....");
-            (4, ())
-        });
-        assert_eq!(ring.len(), 0);
-        assert_eq!(&ring.storage[..], b"............");
-    }
-
-    #[test]
-    fn test_buffer_dequeue_many() {
-        let ring = RingBufferSync::new(vec![b'.'; 12]);
-
-        assert_eq!(ring.enqueue_slice(b"abcdefghijkl"), 12);
-
-        {
-            let buf = ring.dequeue_many(8);
-            assert_eq!(buf, b"abcdefgh");
-            buf.copy_from_slice(b"........");
-        }
-        assert_eq!(ring.len(), 4);
-        assert_eq!(&ring.storage[..], b"........ijkl");
-
-        {
-            let buf = ring.dequeue_many(8);
-            assert_eq!(buf, b"ijkl");
-            buf.copy_from_slice(b"....");
-        }
-        assert_eq!(ring.len(), 0);
-        assert_eq!(&ring.storage[..], b"............");
     }
 
     #[test]
@@ -631,94 +572,6 @@ mod test {
             assert_eq!(&buf[..], b"ijklabcd");
             assert_eq!(ring.len(), 0);
         }
-    }
-
-    #[test]
-    fn test_buffer_get_unallocated() {
-        let ring = RingBufferSync::new(vec![b'.'; 12]);
-
-        assert_eq!(ring.get_unallocated(16, 4), b"");
-
-        {
-            let buf = ring.get_unallocated(0, 4);
-            buf.copy_from_slice(b"abcd");
-        }
-        assert_eq!(&ring.storage[..], b"abcd........");
-
-        ring.enqueue_many(4);
-        assert_eq!(ring.len(), 4);
-
-        {
-            let buf = ring.get_unallocated(4, 8);
-            buf.copy_from_slice(b"ijkl");
-        }
-        assert_eq!(&ring.storage[..], b"abcd....ijkl");
-
-        ring.enqueue_many(8).copy_from_slice(b"EFGHIJKL");
-        ring.dequeue_many(4).copy_from_slice(b"abcd");
-        assert_eq!(ring.len(), 8);
-        assert_eq!(&ring.storage[..], b"abcdEFGHIJKL");
-
-        {
-            let buf = ring.get_unallocated(0, 8);
-            buf.copy_from_slice(b"ABCD");
-        }
-        assert_eq!(&ring.storage[..], b"ABCDEFGHIJKL");
-    }
-
-    #[test]
-    fn test_buffer_write_unallocated() {
-        let ring = RingBufferSync::new(vec![b'.'; 12]);
-        ring.enqueue_many(6).copy_from_slice(b"abcdef");
-        ring.dequeue_many(6).copy_from_slice(b"ABCDEF");
-
-        assert_eq!(ring.write_unallocated(0, b"ghi"), 3);
-        assert_eq!(ring.get_unallocated(0, 3), b"ghi");
-
-        assert_eq!(ring.write_unallocated(3, b"jklmno"), 6);
-        assert_eq!(ring.get_unallocated(3, 3), b"jkl");
-
-        assert_eq!(ring.write_unallocated(9, b"pqrstu"), 3);
-        assert_eq!(ring.get_unallocated(9, 3), b"pqr");
-    }
-
-    #[test]
-    fn test_buffer_get_allocated() {
-        let ring = RingBufferSync::new(vec![b'.'; 12]);
-
-        assert_eq!(ring.get_allocated(16, 4), b"");
-        assert_eq!(ring.get_allocated(0, 4), b"");
-
-        ring.enqueue_slice(b"abcd");
-        assert_eq!(ring.get_allocated(0, 8), b"abcd");
-
-        ring.enqueue_slice(b"efghijkl");
-        ring.dequeue_many(4).copy_from_slice(b"....");
-        assert_eq!(ring.get_allocated(4, 8), b"ijkl");
-
-        ring.enqueue_slice(b"abcd");
-        assert_eq!(ring.get_allocated(4, 8), b"ijkl");
-    }
-
-    #[test]
-    fn test_buffer_read_allocated() {
-        let ring = RingBufferSync::new(vec![b'.'; 12]);
-        ring.enqueue_many(12).copy_from_slice(b"abcdefghijkl");
-
-        let mut data = [0; 6];
-        assert_eq!(ring.read_allocated(0, &mut data[..]), 6);
-        assert_eq!(&data[..], b"abcdef");
-
-        ring.dequeue_many(6).copy_from_slice(b"ABCDEF");
-        ring.enqueue_many(3).copy_from_slice(b"mno");
-
-        let mut data = [0; 6];
-        assert_eq!(ring.read_allocated(3, &mut data[..]), 6);
-        assert_eq!(&data[..], b"jklmno");
-
-        let mut data = [0; 6];
-        assert_eq!(ring.read_allocated(6, &mut data[..]), 3);
-        assert_eq!(&data[..], b"mno\x00\x00\x00");
     }
 
     #[test]

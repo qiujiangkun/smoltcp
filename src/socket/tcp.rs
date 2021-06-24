@@ -286,9 +286,9 @@ pub struct TcpSocket {
     timer:           Timer,
     rtte:            RttEstimator,
     assembler:       Assembler,
-    rx_buffer:       Arc<SocketBuffer>,
+    pub rx_buffer:       Arc<SocketBuffer>,
     rx_fin_received: bool,
-    tx_buffer:       Arc<SocketBuffer>,
+    pub tx_buffer:       Arc<SocketBuffer>,
     /// Interval after which, if no inbound packets are received, the connection is aborted.
     timeout:         Option<Duration>,
     /// Interval at which keep-alive packets will be sent.
@@ -923,7 +923,7 @@ impl TcpSocket {
     /// In all other cases, `Err(Error::Illegal)` is returned and previously received data (if any)
     /// may be incomplete (truncated).
     pub fn recv<'b, F, R>(&'b mut self, f: F) -> Result<R>
-            where F: FnOnce(&'b mut [u8]) -> (usize, R) {
+            where F: FnOnce(&'b [u8]) -> (usize, R) {
         self.recv_impl(|rx_buffer| {
             rx_buffer.dequeue_many_with(f)
         })

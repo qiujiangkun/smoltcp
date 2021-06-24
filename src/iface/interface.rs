@@ -684,7 +684,7 @@ impl<'a, DeviceT> Interface<'a, DeviceT>
 
 
             let socket_result = socket.dispatch(timestamp, _ip_mtu, |response|
-                    respond!(IpPacket::Tcp(response)));
+                respond!(IpPacket::Tcp(response)));
 
             match (device_result, socket_result) {
                 (Err(Error::Exhausted), _) => break,     // nowhere to transmit
@@ -695,7 +695,7 @@ impl<'a, DeviceT> Interface<'a, DeviceT>
                     // mechanism, we would spin on every socket that has yet to discover its
                     // neighboor.
                     socket.meta.neighbor_missing(timestamp,
-                                                       neighbor_addr.expect("non-IP response packet"));
+                                                 neighbor_addr.expect("non-IP response packet"));
                     break;
                 }
                 (Err(err), _) | (_, Err(err)) => {
@@ -1600,16 +1600,18 @@ impl<'a> InterfaceInner<'a> {
         let tcp_packet = TcpPacket::new_checked(ip_payload)?;
         let checksum_caps = self.device_capabilities.checksum.clone();
         let tcp_repr = TcpRepr::parse(&tcp_packet, &src_addr, &dst_addr, &checksum_caps)?;
-
-        for tcp_socket in sockets.iter_tcp_mut() {
-            if !tcp_socket.accepts(&ip_repr, &tcp_repr) { continue; }
-
-            match tcp_socket.process(timestamp, &ip_repr, &tcp_repr) {
-                // The packet is valid and handled by socket.
-                Ok(reply) => return Ok(reply.map(IpPacket::Tcp)),
-                // The packet is malformed, or doesn't match the socket state,
-                // or the socket buffer is full.
-                Err(e) => return Err(e)
+        let handle = TcpHandle::new((dst_addr, tcp_repr.dst_port).into(), (src_addr, tcp_repr.src_port).into());
+        if let Some(tcp_socket) = sockets.get_tcp(handle) {
+            if tcp_socket.accepts(&ip_repr, &tcp_repr) {
+                match tcp_socket.process(timestamp, &ip_repr, &tcp_repr) {
+                    // The packet is valid and handled by socket.
+                    Ok(reply) => return Ok(reply.map(IpPacket::Tcp)),
+                    // The packet is malformed, or doesn't match the socket state,
+                    // or the socket buffer is full.
+                    Err(e) => return Err(e)
+                }
+            } else {
+                unreachable!("Matched tcp socket but not accepted {:?} {:?}", handle, tcp_socket);
             }
         }
 
@@ -1617,9 +1619,9 @@ impl<'a> InterfaceInner<'a> {
             // Never reply to a TCP RST packet with another TCP RST packet.
             Ok(None)
         } else {
-            // The packet wasn't handled by a socket, send a TCP RST packet.
             Ok(Some(IpPacket::Tcp(TcpSocket::rst_reply(&ip_repr, &tcp_repr))))
         }
+
     }
 
     #[cfg(feature = "medium-ethernet")]

@@ -4,6 +4,7 @@ use managed::ManagedSlice;
 use crate::socket::{Socket, SocketRef, AnySocket, TcpSocket};
 use std::collections::HashMap;
 use crate::wire::IpEndpoint;
+use crate::wire::ip::Address;
 
 /// An item of a socket set.
 ///
@@ -25,7 +26,8 @@ pub struct Handle(usize);
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct TcpHandle(IpEndpoint, IpEndpoint);
 impl TcpHandle {
-    pub fn new(local: IpEndpoint, remote: IpEndpoint) -> Self {
+    pub fn new(mut local: IpEndpoint, remote: IpEndpoint) -> Self {
+        local.addr = Address::Unspecified;
         Self(local, remote)
     }
     pub fn local(self) -> IpEndpoint {
@@ -174,6 +176,7 @@ impl<'a> Set<'a> {
     /// Pruning affects sockets with reference count 0. Open sockets are closed.
     /// Closed sockets are removed and dropped.
     pub fn prune(&mut self) {
+        // TODO: remove old tcp sockets
         for (index, item) in self.sockets.iter_mut().enumerate() {
             let mut may_remove = false;
             if let Some(Item { refs: 0, ref mut socket }) = *item {
