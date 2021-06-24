@@ -762,6 +762,7 @@ impl<'a, DeviceT> Interface<'a, DeviceT>
                     // todo don't unwrap
                         socket.dispatch(timestamp, inner.ethernet_addr.unwrap(), _ip_mtu, |response|
                             respond!(IpPacket::Dhcpv4(response))),
+                    Socket::__Phantom(_) => unreachable!()
                 };
 
             match (device_result, socket_result) {

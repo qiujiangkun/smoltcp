@@ -51,7 +51,6 @@ pub struct Set<'a> {
     #[cfg(feature = "socket-tcp")]
     tcp_sockets: HashMap<TcpHandle, TcpSocket>,
 }
-
 impl<'a> Set<'a> {
     /// Create a socket set using the provided storage.
     pub fn new<SocketsT>(sockets: SocketsT) -> Set<'a>
@@ -191,6 +190,7 @@ impl<'a> Set<'a> {
                     #[cfg(feature = "socket-dhcpv4")]
                     Socket::Dhcpv4(_) =>
                         may_remove = true,
+                    Socket::__Phantom(_) => unreachable!(),
                 }
             }
             if may_remove {
