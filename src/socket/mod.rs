@@ -63,6 +63,7 @@ pub use self::set::{Iter as SocketSetIter, IterMut as SocketSetIterMut};
 
 pub use self::ref_::Ref as SocketRef;
 pub(crate) use self::ref_::Session as SocketSession;
+use std::marker::PhantomData;
 
 /// Gives an indication on the next time the socket should be polled.
 #[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Clone, Copy)]
@@ -98,6 +99,7 @@ pub enum Socket<'a> {
     Tcp(TcpSocket),
     #[cfg(feature = "socket-dhcpv4")]
     Dhcpv4(Dhcpv4Socket),
+    __Phantom(PhantomData<&'a ()>)
 }
 
 macro_rules! dispatch_socket {
@@ -119,6 +121,7 @@ macro_rules! dispatch_socket {
             &$( $mut_ )* Socket::Tcp(ref $( $mut_ )* $socket) => $code,
             #[cfg(feature = "socket-dhcpv4")]
             &$( $mut_ )* Socket::Dhcpv4(ref $( $mut_ )* $socket) => $code,
+            &$( $mut_ )* Socket::__Phantom(_) => unreachable!(),
         }
     };
 }
