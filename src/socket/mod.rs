@@ -95,7 +95,7 @@ pub enum Socket<'a> {
     #[cfg(feature = "socket-udp")]
     Udp(UdpSocket<'a>),
     #[cfg(feature = "socket-tcp")]
-    Tcp(TcpSocket<'a>),
+    Tcp(TcpSocket),
     #[cfg(feature = "socket-dhcpv4")]
     Dhcpv4(Dhcpv4Socket),
 }
@@ -177,6 +177,6 @@ from_socket!(IcmpSocket<'a>, Icmp);
 #[cfg(feature = "socket-udp")]
 from_socket!(UdpSocket<'a>, Udp);
 #[cfg(feature = "socket-tcp")]
-from_socket!(TcpSocket<'a>, Tcp);
+from_socket!(TcpSocket, Tcp);
 #[cfg(feature = "socket-dhcpv4")]
 from_socket!(Dhcpv4Socket, Dhcpv4);

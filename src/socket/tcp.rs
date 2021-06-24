@@ -9,13 +9,14 @@ use core::task::Waker;
 use crate::{Error, Result};
 use crate::time::{Duration, Instant};
 use crate::socket::{Socket, SocketMeta, SocketHandle, PollAt};
-use crate::storage::{Assembler, RingBuffer};
+use crate::storage::{Assembler, RingBufferSync};
 #[cfg(feature = "async")]
 use crate::socket::WakerRegistration;
 use crate::wire::{IpProtocol, IpRepr, IpAddress, IpEndpoint, TcpSeqNumber, TcpRepr, TcpControl};
+use std::sync::Arc;
 
 /// A TCP socket ring buffer.
-pub type SocketBuffer<'a> = RingBuffer<'a, u8>;
+pub type SocketBuffer = RingBufferSync<'static, u8>;
 
 /// The state of a TCP socket, according to [RFC 793].
 ///
@@ -279,15 +280,15 @@ impl Timer {
 /// accept several connections, as many sockets must be allocated, or any new connection
 /// attempts will be reset.
 #[derive(Debug)]
-pub struct TcpSocket<'a> {
+pub struct TcpSocket {
     pub(crate) meta: SocketMeta,
     state:           State,
     timer:           Timer,
     rtte:            RttEstimator,
     assembler:       Assembler,
-    rx_buffer:       SocketBuffer<'a>,
+    rx_buffer:       Arc<SocketBuffer>,
     rx_fin_received: bool,
-    tx_buffer:       SocketBuffer<'a>,
+    tx_buffer:       Arc<SocketBuffer>,
     /// Interval after which, if no inbound packets are received, the connection is aborted.
     timeout:         Option<Duration>,
     /// Interval at which keep-alive packets will be sent.
@@ -358,11 +359,11 @@ pub struct TcpSocket<'a> {
 
 const DEFAULT_MSS: usize = 536;
 
-impl<'a> TcpSocket<'a> {
+impl TcpSocket {
     #[allow(unused_comparisons)] // small usize platforms always pass rx_capacity check
     /// Create a socket using the given buffers.
-    pub fn new<T>(rx_buffer: T, tx_buffer: T) -> TcpSocket<'a>
-            where T: Into<SocketBuffer<'a>> {
+    pub fn new<T>(rx_buffer: T, tx_buffer: T) -> TcpSocket
+            where T: Into<Arc<SocketBuffer>> {
         let (rx_buffer, tx_buffer) = (rx_buffer.into(), tx_buffer.into());
         let rx_capacity = rx_buffer.capacity();
 
@@ -715,7 +716,7 @@ impl<'a> TcpSocket<'a> {
         self.set_state(State::Closed);
     }
 
-    /// Return whether the socket is passively listening for incoming connections.
+    /// Return whether the socket is passively luse more minimal_executoristening for incoming connections.
     ///
     /// In terms of the TCP state machine, the socket must be in the `LISTEN` state.
     #[inline]
@@ -837,7 +838,7 @@ impl<'a> TcpSocket<'a> {
     }
 
     fn send_impl<'b, F, R>(&'b mut self, f: F) -> Result<R>
-            where F: FnOnce(&'b mut SocketBuffer<'a>) -> (usize, R) {
+            where F: FnOnce(&'b SocketBuffer) -> (usize, R) {
         if !self.may_send() { return Err(Error::Illegal) }
 
         // The connection might have been idle for a long time, and so remote_last_ts
@@ -846,7 +847,7 @@ impl<'a> TcpSocket<'a> {
         if self.tx_buffer.is_empty() { self.remote_last_ts = None }
 
         let _old_length = self.tx_buffer.len();
-        let (size, result) = f(&mut self.tx_buffer);
+        let (size, result) = f(&self.tx_buffer);
         if size > 0 {
             #[cfg(any(test, feature = "verbose"))]
             net_trace!("{}:{}:{}: tx buffer: enqueueing {} octets (now {})",
@@ -896,11 +897,11 @@ impl<'a> TcpSocket<'a> {
     }
 
     fn recv_impl<'b, F, R>(&'b mut self, f: F) -> Result<R>
-            where F: FnOnce(&'b mut SocketBuffer<'a>) -> (usize, R) {
+            where F: FnOnce(&'b SocketBuffer) -> (usize, R) {
         self.recv_error_check()?;
 
         let _old_length = self.rx_buffer.len();
-        let (size, result) = f(&mut self.rx_buffer);
+        let (size, result) = f(&self.rx_buffer);
         self.remote_seq_no += size;
         if size > 0 {
             #[cfg(any(test, feature = "verbose"))]
@@ -1949,13 +1950,13 @@ impl<'a> TcpSocket<'a> {
     }
 }
 
-impl<'a> Into<Socket<'a>> for TcpSocket<'a> {
+impl<'a> Into<Socket<'a>> for TcpSocket {
     fn into(self) -> Socket<'a> {
         Socket::Tcp(self)
     }
 }
 
-impl<'a> fmt::Write for TcpSocket<'a> {
+impl fmt::Write for TcpSocket {
     fn write_str(&mut self, slice: &str) -> fmt::Result {
         let slice = slice.as_bytes();
         if self.send_slice(slice) == Ok(slice.len()) {
@@ -2140,11 +2141,11 @@ mod test {
         println!();
     }
 
-    fn socket() -> TcpSocket<'static> {
+    fn socket() -> TcpSocket {
         socket_with_buffer_sizes(64, 64)
     }
 
-    fn socket_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TcpSocket<'static> {
+    fn socket_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TcpSocket {
         #[cfg(feature = "log")]
         init_logger();
 
@@ -2158,7 +2159,7 @@ mod test {
     fn socket_syn_received_with_buffer_sizes(
         tx_len: usize,
         rx_len: usize
-    ) -> TcpSocket<'static> {
+    ) -> TcpSocket {
         let mut s = socket_with_buffer_sizes(tx_len, rx_len);
         s.state           = State::SynReceived;
         s.local_endpoint  = LOCAL_END;
@@ -2170,11 +2171,11 @@ mod test {
         s
     }
 
-    fn socket_syn_received() -> TcpSocket<'static> {
+    fn socket_syn_received() -> TcpSocket {
         socket_syn_received_with_buffer_sizes(64, 64)
     }
 
-    fn socket_syn_sent() -> TcpSocket<'static> {
+    fn socket_syn_sent() -> TcpSocket {
         let mut s = socket();
         s.state           = State::SynSent;
         s.local_endpoint  = IpEndpoint::new(MOCK_UNSPECIFIED, LOCAL_PORT);
@@ -2184,7 +2185,7 @@ mod test {
         s
     }
 
-    fn socket_syn_sent_with_local_ipendpoint(local: IpEndpoint) -> TcpSocket<'static> {
+    fn socket_syn_sent_with_local_ipendpoint(local: IpEndpoint) -> TcpSocket {
         let mut s = socket();
         s.state           = State::SynSent;
         s.local_endpoint  = local;
@@ -2194,7 +2195,7 @@ mod test {
         s
     }
 
-    fn socket_established_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TcpSocket<'static> {
+    fn socket_established_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TcpSocket {
         let mut s = socket_syn_received_with_buffer_sizes(tx_len, rx_len);
         s.state           = State::Established;
         s.local_seq_no    = LOCAL_SEQ + 1;
@@ -2204,17 +2205,17 @@ mod test {
         s
     }
 
-    fn socket_established() -> TcpSocket<'static> {
+    fn socket_established() -> TcpSocket {
         socket_established_with_buffer_sizes(64, 64)
     }
 
-    fn socket_fin_wait_1() -> TcpSocket<'static> {
+    fn socket_fin_wait_1() -> TcpSocket {
         let mut s = socket_established();
         s.state           = State::FinWait1;
         s
     }
 
-    fn socket_fin_wait_2() -> TcpSocket<'static> {
+    fn socket_fin_wait_2() -> TcpSocket {
         let mut s = socket_fin_wait_1();
         s.state           = State::FinWait2;
         s.local_seq_no    = LOCAL_SEQ + 1 + 1;
@@ -2222,7 +2223,7 @@ mod test {
         s
     }
 
-    fn socket_closing() -> TcpSocket<'static> {
+    fn socket_closing() -> TcpSocket {
         let mut s = socket_fin_wait_1();
         s.state           = State::Closing;
         s.remote_last_seq = LOCAL_SEQ + 1 + 1;
@@ -2230,7 +2231,7 @@ mod test {
         s
     }
 
-    fn socket_time_wait(from_closing: bool) -> TcpSocket<'static> {
+    fn socket_time_wait(from_closing: bool) -> TcpSocket {
         let mut s = socket_fin_wait_2();
         s.state           = State::TimeWait;
         s.remote_seq_no   = REMOTE_SEQ + 1 + 1;
@@ -2241,7 +2242,7 @@ mod test {
         s
     }
 
-    fn socket_close_wait() -> TcpSocket<'static> {
+    fn socket_close_wait() -> TcpSocket {
         let mut s = socket_established();
         s.state           = State::CloseWait;
         s.remote_seq_no   = REMOTE_SEQ + 1 + 1;
@@ -2249,13 +2250,13 @@ mod test {
         s
     }
 
-    fn socket_last_ack() -> TcpSocket<'static> {
+    fn socket_last_ack() -> TcpSocket {
         let mut s = socket_close_wait();
         s.state           = State::LastAck;
         s
     }
 
-    fn socket_recved() -> TcpSocket<'static> {
+    fn socket_recved() -> TcpSocket {
         let mut s = socket_established();
         send!(s, TcpRepr {
             seq_number: REMOTE_SEQ + 1,
@@ -2310,7 +2311,7 @@ mod test {
     // =========================================================================================//
     // Tests for the LISTEN state.
     // =========================================================================================//
-    fn socket_listen() -> TcpSocket<'static> {
+    fn socket_listen() -> TcpSocket {
         let mut s = socket();
         s.state           = State::Listen;
         s.local_endpoint  = IpEndpoint::new(IpAddress::default(), LOCAL_PORT);
@@ -2821,7 +2822,7 @@ mod test {
         assert_eq!(s.rx_buffer.dequeue_many(6), &b"abcdef"[..]);
     }
 
-    fn setup_rfc2018_cases() -> (TcpSocket<'static>, Vec<u8>) {
+    fn setup_rfc2018_cases() -> (TcpSocket, Vec<u8>) {
         // This is a utility function used by the tests for RFC 2018 cases. It configures a socket
         // in a particular way suitable for those cases.
         //
@@ -2908,7 +2909,7 @@ mod test {
         let mut s = socket_established();
         // Update our scaling parameters for a TCP with a scaled buffer.
         assert_eq!(s.rx_buffer.len(), 0);
-        s.rx_buffer = SocketBuffer::new(vec![0; 262143]);
+        s.rx_buffer = SocketBuffer::new(vec![0; 262143]).into();
         s.assembler = Assembler::new(s.rx_buffer.capacity());
         s.remote_win_scale = Some(0);
         s.remote_last_win = 65535;
@@ -4412,7 +4413,7 @@ mod test {
     #[test]
     fn test_maximum_segment_size() {
         let mut s = socket_listen();
-        s.tx_buffer = SocketBuffer::new(vec![0; 32767]);
+        s.tx_buffer = Arc::new(SocketBuffer::new(vec![0; 32767]));
         send!(s, TcpRepr {
             control: TcpControl::Syn,
             seq_number: REMOTE_SEQ,
@@ -4543,7 +4544,7 @@ mod test {
     #[test]
     fn test_zero_window_ack() {
         let mut s = socket_established();
-        s.rx_buffer = SocketBuffer::new(vec![0; 6]);
+        s.rx_buffer = Arc::new(SocketBuffer::new(vec![0; 6]));
         s.assembler = Assembler::new(s.rx_buffer.capacity());
         send!(s, TcpRepr {
             seq_number: REMOTE_SEQ + 1,
@@ -4573,7 +4574,7 @@ mod test {
     #[test]
     fn test_zero_window_ack_on_window_growth() {
         let mut s = socket_established();
-        s.rx_buffer = SocketBuffer::new(vec![0; 6]);
+        s.rx_buffer = Arc::new(SocketBuffer::new(vec![0; 6]));
         s.assembler = Assembler::new(s.rx_buffer.capacity());
         send!(s, TcpRepr {
             seq_number: REMOTE_SEQ + 1,
@@ -4637,7 +4638,7 @@ mod test {
     #[test]
     fn test_announce_window_after_read() {
         let mut s = socket_established();
-        s.rx_buffer = SocketBuffer::new(vec![0; 6]);
+        s.rx_buffer = Arc::new(SocketBuffer::new(vec![0; 6]));
         s.assembler = Assembler::new(s.rx_buffer.capacity());
         send!(s, TcpRepr {
             seq_number: REMOTE_SEQ + 1,
@@ -4984,7 +4985,7 @@ mod test {
     #[test]
     fn test_buffer_wraparound_rx() {
         let mut s = socket_established();
-        s.rx_buffer = SocketBuffer::new(vec![0; 6]);
+        s.rx_buffer = Arc::new(SocketBuffer::new(vec![0; 6]));
         s.assembler = Assembler::new(s.rx_buffer.capacity());
         send!(s, TcpRepr {
             seq_number: REMOTE_SEQ + 1,
@@ -5010,7 +5011,7 @@ mod test {
     #[test]
     fn test_buffer_wraparound_tx() {
         let mut s = socket_established();
-        s.tx_buffer = SocketBuffer::new(vec![b'.'; 9]);
+        s.tx_buffer = Arc::new(SocketBuffer::new(vec![b'.'; 9]));
         assert_eq!(s.send_slice(b"xxxyyy"), Ok(6));
         assert_eq!(s.tx_buffer.dequeue_many(3), &b"xxx"[..]);
         assert_eq!(s.tx_buffer.len(), 3);
@@ -5305,7 +5306,7 @@ mod test {
     #[test]
     fn test_doesnt_accept_wrong_port() {
         let mut s = socket_established();
-        s.rx_buffer = SocketBuffer::new(vec![0; 6]);
+        s.rx_buffer = Arc::new(SocketBuffer::new(vec![0; 6]));
         s.assembler = Assembler::new(s.rx_buffer.capacity());
 
         let tcp_repr = TcpRepr {

@@ -18,7 +18,7 @@ impl<'a> Session for crate::socket::IcmpSocket<'a> {}
 #[cfg(feature = "socket-udp")]
 impl<'a> Session for crate::socket::UdpSocket<'a> {}
 #[cfg(feature = "socket-tcp")]
-impl<'a> Session for crate::socket::TcpSocket<'a> {}
+impl Session for crate::socket::TcpSocket {}
 #[cfg(feature = "socket-dhcpv4")]
 impl Session for crate::socket::Dhcpv4Socket {}
 
