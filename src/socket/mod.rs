@@ -58,7 +58,7 @@ pub use self::tcp::{SocketBuffer as TcpSocketBuffer,
 #[cfg(feature = "socket-dhcpv4")]
 pub use self::dhcpv4::{Dhcpv4Socket, Config as Dhcpv4Config, Event as Dhcpv4Event};
 
-pub use self::set::{Set as SocketSet, Item as SocketSetItem, Handle as SocketHandle};
+pub use self::set::{Set as SocketSet, Item as SocketSetItem, Handle as SocketHandle, TcpHandle};
 pub use self::set::{Iter as SocketSetIter, IterMut as SocketSetIterMut};
 
 pub use self::ref_::Ref as SocketRef;
