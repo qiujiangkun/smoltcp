@@ -51,7 +51,7 @@ impl fmt::Display for Handle {
 pub struct Set<'a> {
     sockets: ManagedSlice<'a, Option<Item<'a>>>,
     #[cfg(feature = "socket-tcp")]
-    tcp_sockets: HashMap<TcpHandle, TcpSocket>,
+    tcp_sockets: HashMap<TcpHandle, TcpSocket<'a>>,
 }
 impl<'a> Set<'a> {
     /// Create a socket set using the provided storage.
@@ -67,7 +67,7 @@ impl<'a> Set<'a> {
     }
 
     #[cfg(feature = "socket-tcp")]
-    pub fn add_tcp(&mut self, tcp: TcpSocket) -> TcpHandle {
+    pub fn add_tcp(&mut self, tcp: TcpSocket<'a>) -> TcpHandle {
         let handle = TcpHandle::new(tcp.local_endpoint(), tcp.remote_endpoint());
         net_trace!("TCP {:?}: adding", handle);
         self.tcp_sockets.insert(handle, tcp);
@@ -111,7 +111,7 @@ impl<'a> Set<'a> {
         }
     }
     #[cfg(feature = "socket-tcp")]
-    pub fn get_tcp(&mut self, handle: TcpHandle) -> Option<&mut TcpSocket> {
+    pub fn get_tcp(&mut self, handle: TcpHandle) -> Option<&mut TcpSocket<'a>> {
         self.tcp_sockets.get_mut(&handle)
     }
     /// Get a socket from the set by its handle, as mutable.
@@ -205,7 +205,7 @@ impl<'a> Set<'a> {
     pub fn iter_tcp(&self) -> impl Iterator<Item = &TcpSocket> {
         self.tcp_sockets.values()
     }
-    pub fn iter_tcp_mut(&mut self) -> impl Iterator<Item = &mut TcpSocket> {
+    pub fn iter_tcp_mut(&mut self) -> impl Iterator<Item = &mut TcpSocket<'a>> {
         self.tcp_sockets.values_mut()
     }
     /// Iterate every socket in this set.
