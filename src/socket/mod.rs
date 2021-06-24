@@ -52,6 +52,7 @@ pub use self::udp::{UdpPacketMetadata,
 
 #[cfg(feature = "socket-tcp")]
 pub use self::tcp::{SocketBuffer as TcpSocketBuffer,
+                    SocketBufferSync as TcpSocketBufferSync,
                     State as TcpState,
                     TcpSocket};
 

@@ -9,17 +9,16 @@ use core::task::Waker;
 use crate::{Error, Result};
 use crate::time::{Duration, Instant};
 use crate::socket::{SocketMeta, SocketHandle, PollAt};
-use crate::storage::{Assembler, RingBuffer, SocketBufferSender, SocketBufferReceiver, new_socket_buffer_channel};
+use crate::storage::{Assembler, RingBuffer, SocketBufferSender, SocketBufferReceiver, new_socket_buffer_channel, RingBufferSync};
 #[cfg(feature = "async")]
 use crate::socket::WakerRegistration;
 use crate::wire::{IpProtocol, IpRepr, IpAddress, IpEndpoint, TcpSeqNumber, TcpRepr, TcpControl};
 use crossbeam::atomic::AtomicCell;
 use std::sync::Arc;
-use std::io::Cursor;
-use crossbeam::channel::TryRecvError;
 
 /// A TCP socket ring buffer.
 pub type SocketBuffer<'a> = RingBuffer<'a, u8>;
+pub type SocketBufferSync<'a> = RingBufferSync<'a, u8>;
 
 /// The state of a TCP socket, according to [RFC 793].
 ///
@@ -291,7 +290,7 @@ pub struct TcpSocket<'a> {
     assembler: Assembler,
     rx_buffer: SocketBuffer<'a>,
     rx_fin_received: bool,
-    tx_buffer: SocketBuffer<'a>,
+    tx_buffer: Arc<SocketBufferSync<'a>>,
 
     /// Interval after which, if no inbound packets are received, the connection is aborted.
     timeout: Option<Duration>,
@@ -360,8 +359,6 @@ pub struct TcpSocket<'a> {
     tx_waker: WakerRegistration,
 
     read_buffer: Option<SocketBufferSender>,
-    write_buffer: Option<SocketBufferReceiver>,
-    temp_write_value: Option<Cursor<Vec<u8>>>,
 }
 
 const DEFAULT_MSS: usize = 536;
@@ -369,8 +366,8 @@ const DEFAULT_MSS: usize = 536;
 impl<'a> TcpSocket<'a> {
     #[allow(unused_comparisons)] // small usize platforms always pass rx_capacity check
     /// Create a socket using the given buffers.
-    pub fn new<T>(rx_buffer: T, tx_buffer: T) -> TcpSocket<'a>
-        where T: Into<SocketBuffer<'a>> {
+    pub fn new(rx_buffer: impl Into<SocketBuffer<'a>>, tx_buffer: impl Into<SocketBufferSync<'a>>) -> TcpSocket<'a>
+    {
         let (rx_buffer, tx_buffer) = (rx_buffer.into(), tx_buffer.into());
         let rx_capacity = rx_buffer.capacity();
 
@@ -390,7 +387,7 @@ impl<'a> TcpSocket<'a> {
             timer: Timer::default(),
             rtte: RttEstimator::default(),
             assembler: Assembler::new(rx_buffer.capacity()),
-            tx_buffer: tx_buffer,
+            tx_buffer: Arc::new(tx_buffer),
             rx_buffer: rx_buffer,
             rx_fin_received: false,
             timeout: None,
@@ -421,8 +418,6 @@ impl<'a> TcpSocket<'a> {
             #[cfg(feature = "async")]
             tx_waker: WakerRegistration::new(),
             read_buffer: None,
-            write_buffer: None,
-            temp_write_value: None,
         }
     }
 
@@ -615,7 +610,6 @@ impl<'a> TcpSocket<'a> {
         self.remote_last_ts = None;
         self.ack_delay = Some(ACK_DELAY_DEFAULT);
         self.ack_delay_until = None;
-        self.temp_write_value = None;
 
         #[cfg(feature = "async")]
             {
@@ -849,7 +843,7 @@ impl<'a> TcpSocket<'a> {
     }
 
     fn send_impl<'b, F, R>(&'b mut self, f: F) -> Result<R>
-        where F: FnOnce(&'b mut SocketBuffer<'a>) -> (usize, R) {
+        where F: FnOnce(&'b SocketBufferSync<'a>) -> (usize, R) {
         if !self.may_send() { return Err(Error::Illegal); }
 
         // The connection might have been idle for a long time, and so remote_last_ts
@@ -858,7 +852,7 @@ impl<'a> TcpSocket<'a> {
         if self.tx_buffer.is_empty() { self.remote_last_ts = None }
 
         let _old_length = self.tx_buffer.len();
-        let (size, result) = f(&mut self.tx_buffer);
+        let (size, result) = f(&*self.tx_buffer);
         if size > 0 {
             #[cfg(any(test, feature = "verbose"))]
             net_trace!("{}:{}:{}: tx buffer: enqueueing {} octets (now {})",
@@ -996,46 +990,14 @@ impl<'a> TcpSocket<'a> {
     pub fn recv_queue(&self) -> usize {
         self.rx_buffer.len()
     }
-    pub fn set_sync_write_buffer(&mut self) -> SocketBufferSender {
-        assert!(self.write_buffer.is_none());
-        let (tx, rx) = new_socket_buffer_channel();
-        self.write_buffer = Some(rx);
-        tx
+    pub fn set_sync_write_buffer(&mut self) -> Arc<SocketBufferSync<'a>> {
+        Arc::clone(&self.tx_buffer)
     }
     pub fn set_sync_read_buffer(&mut self) -> SocketBufferReceiver {
-        assert!(self.write_buffer.is_none());
+        assert!(self.read_buffer.is_none());
         let (tx, rx) = new_socket_buffer_channel();
         self.read_buffer = Some(tx);
         rx
-    }
-    pub fn sync_write_buffer(&mut self) {
-        if let Some(rx) = self.write_buffer.as_mut() {
-            let buf = if let Some(last) = self.temp_write_value.take() {
-                Some(last)
-            } else {
-                match rx.try_recv() {
-                    Ok(data) => Some(Cursor::new(data)),
-                    Err(TryRecvError::Disconnected) => {
-                        unreachable!()
-                    }
-                    Err(TryRecvError::Empty) => None,
-                }
-            };
-            if let Some(mut buf) = buf {
-                let result = self.send_slice(&buf.get_ref().as_slice()[buf.position() as usize..]);
-                match result {
-                    Ok(enqueued) if enqueued == buf.get_ref().len() => {}
-                    Ok(enqueued) => {
-                        buf.set_position(buf.position() + enqueued as u64);
-                        self.temp_write_value = Some(buf);
-                    }
-                    Err(Error::Exhausted) => {
-                        self.temp_write_value = Some(buf);
-                    }
-                    Err(_e) => {}
-                }
-            }
-        }
     }
     pub fn sync_read_buffer(&mut self) {
         if self.read_buffer.is_some() {
@@ -1541,8 +1503,6 @@ impl<'a> TcpSocket<'a> {
                        ack_len, self.tx_buffer.len() - ack_len);
             self.tx_buffer.dequeue_allocated(ack_len);
 
-            self.sync_write_buffer();
-
             // There's new room available in tx_buffer, wake the waiting task if any.
             #[cfg(feature = "async")]
                 self.tx_waker.wake();
@@ -1743,7 +1703,6 @@ impl<'a> TcpSocket<'a> {
                               emit: F) -> Result<()>
         where F: FnOnce((IpRepr, TcpRepr)) -> Result<()> {
         if !self.remote_endpoint.is_specified() { return Err(Error::Exhausted); }
-        self.sync_write_buffer();
 
         if self.remote_last_ts.is_none() {
             // We get here in exactly two cases:
@@ -2225,7 +2184,7 @@ mod test {
             init_logger();
 
         let rx_buffer = SocketBuffer::new(vec![0; rx_len]);
-        let tx_buffer = SocketBuffer::new(vec![0; tx_len]);
+        let tx_buffer = SocketBufferSync::new(vec![0; tx_len]);
         let mut socket = TcpSocket::new(rx_buffer, tx_buffer);
         socket.set_ack_delay(None);
         socket
@@ -4495,7 +4454,7 @@ mod test {
     #[test]
     fn test_maximum_segment_size() {
         let mut s = socket_listen();
-        s.tx_buffer = SocketBuffer::new(vec![0; 32767]);
+        s.tx_buffer = Arc::new(SocketBufferSync::new(vec![0; 32767]));
         send!(s, TcpRepr {
             control: TcpControl::Syn,
             seq_number: REMOTE_SEQ,
@@ -5093,7 +5052,7 @@ mod test {
     #[test]
     fn test_buffer_wraparound_tx() {
         let mut s = socket_established();
-        s.tx_buffer = SocketBuffer::new(vec![b'.'; 9]);
+        s.tx_buffer = Arc::new(SocketBufferSync::new(vec![b'.'; 9]));
         assert_eq!(s.send_slice(b"xxxyyy"), Ok(6));
         assert_eq!(s.tx_buffer.dequeue_many(3), &b"xxx"[..]);
         assert_eq!(s.tx_buffer.len(), 3);
