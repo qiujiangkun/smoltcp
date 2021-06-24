@@ -13,6 +13,8 @@ use crate::storage::{Assembler, RingBuffer, SocketBufferSender, SocketBufferRece
 #[cfg(feature = "async")]
 use crate::socket::WakerRegistration;
 use crate::wire::{IpProtocol, IpRepr, IpAddress, IpEndpoint, TcpSeqNumber, TcpRepr, TcpControl};
+use crossbeam::atomic::AtomicCell;
+use std::sync::Arc;
 
 /// A TCP socket ring buffer.
 pub type SocketBuffer<'a> = RingBuffer<'a, u8>;
@@ -281,7 +283,7 @@ impl Timer {
 #[derive(Debug)]
 pub struct TcpSocket<'a> {
     pub(crate) meta: SocketMeta,
-    state: State,
+    pub state: Arc<AtomicCell<State>>,
     timer: Timer,
     rtte: RttEstimator,
     assembler: Assembler,
@@ -382,7 +384,7 @@ impl<'a> TcpSocket<'a> {
 
         TcpSocket {
             meta: SocketMeta::default(),
-            state: State::Closed,
+            state: Arc::new(AtomicCell::new(State::Closed)),
             timer: Timer::default(),
             rtte: RttEstimator::default(),
             assembler: Assembler::new(rx_buffer.capacity()),
@@ -578,14 +580,14 @@ impl<'a> TcpSocket<'a> {
     /// Return the connection state, in terms of the TCP state machine.
     #[inline]
     pub fn state(&self) -> State {
-        self.state
+        self.state.load()
     }
 
     fn reset(&mut self) {
         let rx_cap_log2 = mem::size_of::<usize>() * 8 -
             self.rx_buffer.capacity().leading_zeros() as usize;
 
-        self.state = State::Closed;
+        self.state.store(State::Closed);
         self.timer = Timer::default();
         self.rtte = RttEstimator::default();
         self.assembler = Assembler::new(self.rx_buffer.capacity());
@@ -687,7 +689,7 @@ impl<'a> TcpSocket<'a> {
     /// connection; only the remote end can close it. If you no longer wish to receive any
     /// data and would like to reuse the socket right away, use [abort](#method.abort).
     pub fn close(&mut self) {
-        match self.state {
+        match self.state.load() {
             // In the LISTEN state there is no established connection.
             State::Listen =>
                 self.set_state(State::Closed),
@@ -725,7 +727,7 @@ impl<'a> TcpSocket<'a> {
     /// In terms of the TCP state machine, the socket must be in the `LISTEN` state.
     #[inline]
     pub fn is_listening(&self) -> bool {
-        match self.state {
+        match self.state.load() {
             State::Listen => true,
             _ => false
         }
@@ -741,7 +743,7 @@ impl<'a> TcpSocket<'a> {
     /// or `TIME-WAIT` states.
     #[inline]
     pub fn is_open(&self) -> bool {
-        match self.state {
+        match self.state.load() {
             State::Closed => false,
             State::TimeWait => false,
             _ => true
@@ -762,7 +764,7 @@ impl<'a> TcpSocket<'a> {
     /// or `LISTEN` state.
     #[inline]
     pub fn is_active(&self) -> bool {
-        match self.state {
+        match self.state.load() {
             State::Closed => false,
             State::TimeWait => false,
             State::Listen => false,
@@ -781,7 +783,7 @@ impl<'a> TcpSocket<'a> {
     /// `CLOSE-WAIT` state.
     #[inline]
     pub fn may_send(&self) -> bool {
-        match self.state {
+        match self.state.load() {
             State::Established => true,
             // In CLOSE-WAIT, the remote endpoint has closed our receive half of the connection
             // but we still can transmit indefinitely.
@@ -800,7 +802,7 @@ impl<'a> TcpSocket<'a> {
     /// `FIN-WAIT-1`, or `FIN-WAIT-2` state, or have data in the receive buffer instead.
     #[inline]
     pub fn may_recv(&self) -> bool {
-        match self.state {
+        match self.state.load() {
             State::Established => true,
             // In FIN-WAIT-1/2, we have closed our transmit half of the connection but
             // we still can receive indefinitely.
@@ -1028,19 +1030,19 @@ impl<'a> TcpSocket<'a> {
         }
     }
     fn set_state(&mut self, state: State) {
-        if self.state != state {
+        if self.state.load() != state {
             if self.remote_endpoint.addr.is_unspecified() {
                 net_trace!("{}:{}: state={}=>{}",
                            self.meta.handle, self.local_endpoint,
-                           self.state, state);
+                           self.state.load(), state);
             } else {
                 net_trace!("{}:{}:{}: state={}=>{}",
                            self.meta.handle, self.local_endpoint, self.remote_endpoint,
-                           self.state, state);
+                           self.state.load(), state);
             }
         }
 
-        self.state = state;
+        self.state.store(state);
 
         #[cfg(feature = "async")]
             {
@@ -1148,12 +1150,12 @@ impl<'a> TcpSocket<'a> {
     }
 
     pub(crate) fn accepts(&self, ip_repr: &IpRepr, repr: &TcpRepr) -> bool {
-        if self.state == State::Closed { return false; }
+        if self.state.load() == State::Closed { return false; }
 
         // If we're still listening for SYNs and the packet has an ACK, it cannot
         // be destined to this socket, but another one may well listen on the same
         // local endpoint.
-        if self.state == State::Listen && repr.ack_number.is_some() { return false; }
+        if self.state.load() == State::Listen && repr.ack_number.is_some() { return false; }
 
         // Reject packets with a wrong destination.
         if self.local_endpoint.port != repr.dst_port { return false; }
@@ -1175,7 +1177,7 @@ impl<'a> TcpSocket<'a> {
         debug_assert!(self.accepts(ip_repr, repr));
 
         // Consider how much the sequence number space differs from the transmit buffer space.
-        let (sent_syn, sent_fin) = match self.state {
+        let (sent_syn, sent_fin) = match self.state.load() {
             // In SYN-SENT or SYN-RECEIVED, we've just sent a SYN.
             State::SynSent | State::SynReceived => (true, false),
             // In FIN-WAIT-1, LAST-ACK, or CLOSING, we've just sent a FIN.
@@ -1187,7 +1189,7 @@ impl<'a> TcpSocket<'a> {
         let control_len = (sent_syn as usize) + (sent_fin as usize);
 
         // Reject unacceptable acknowledgements.
-        match (self.state, repr) {
+        match (self.state.load(), repr) {
             // An RST received in response to initial SYN is acceptable if it acknowledges
             // the initial SYN.
             (State::SynSent, &TcpRepr {
@@ -1253,7 +1255,7 @@ impl<'a> TcpSocket<'a> {
         let segment_end = repr.seq_number + repr.segment_len();
 
         let payload_offset;
-        match self.state {
+        match self.state.load() {
             // In LISTEN and SYN-SENT states, we have not yet synchronized with the remote end.
             State::Listen | State::SynSent =>
                 payload_offset = 0,
@@ -1289,7 +1291,7 @@ impl<'a> TcpSocket<'a> {
                 } else {
                     // If we're in the TIME-WAIT state, restart the TIME-WAIT timeout, since
                     // the remote end may not have realized we've closed the connection.
-                    if self.state == State::TimeWait {
+                    if self.state.load() == State::TimeWait {
                         self.timer.set_for_close(timestamp);
                     }
 
@@ -1334,7 +1336,7 @@ impl<'a> TcpSocket<'a> {
         }
 
         // Validate and update the state.
-        match (self.state, control) {
+        match (self.state.load(), control) {
             // RSTs are not accepted in the LISTEN state.
             (State::Listen, TcpControl::Rst) =>
                 return Err(Error::Dropped),
@@ -1672,7 +1674,7 @@ impl<'a> TcpSocket<'a> {
             < self.local_seq_no + core::cmp::min(self.remote_win_len, self.tx_buffer.len());
 
         // Do we have to send a FIN?
-        let want_fin = match self.state {
+        let want_fin = match self.state.load() {
             State::FinWait1 => true,
             State::Closing => true,
             State::LastAck => true,
@@ -1705,7 +1707,7 @@ impl<'a> TcpSocket<'a> {
     }
 
     fn window_to_update(&self) -> bool {
-        match self.state {
+        match self.state.load() {
             State::SynSent | State::SynReceived | State::Established | State::FinWait1 | State::FinWait2 =>
                 (self.rx_buffer.window() >> self.remote_win_shift) as u16 > self.remote_last_win,
             _ => false,
@@ -1759,7 +1761,7 @@ impl<'a> TcpSocket<'a> {
             // If we have window length increase to advertise, do it.
             net_trace!("{}:{}:{}: outgoing segment will update window",
                        self.meta.handle, self.local_endpoint, self.remote_endpoint);
-        } else if self.state == State::Closed {
+        } else if self.state.load() == State::Closed {
             // If we need to abort the connection, do it.
             net_trace!("{}:{}:{}: outgoing segment will abort connection",
                        self.meta.handle, self.local_endpoint, self.remote_endpoint);
@@ -1807,7 +1809,7 @@ impl<'a> TcpSocket<'a> {
             payload: &[],
         };
 
-        match self.state {
+        match self.state.load() {
             // We transmit an RST in the CLOSED state. If we ended up in the CLOSED state
             // with a specified endpoint, it means that the socket was aborted.
             State::Closed => {
@@ -1821,7 +1823,7 @@ impl<'a> TcpSocket<'a> {
             // We transmit a SYN|ACK in the SYN-RECEIVED state.
             State::SynSent | State::SynReceived => {
                 repr.control = TcpControl::Syn;
-                if self.state == State::SynSent {
+                if self.state.load() == State::SynSent {
                     repr.ack_number = None;
                     repr.window_scale = Some(self.remote_win_shift);
                     repr.sack_permitted = true;
@@ -1845,7 +1847,7 @@ impl<'a> TcpSocket<'a> {
                 // If we've sent everything we had in the buffer, follow it with the PSH or FIN
                 // flags, depending on whether the transmit half of the connection is open.
                 if offset + repr.payload.len() == self.tx_buffer.len() {
-                    match self.state {
+                    match self.state.load() {
                         State::FinWait1 | State::LastAck | State::Closing =>
                             repr.control = TcpControl::Fin,
                         State::Established | State::CloseWait if !repr.payload.is_empty() =>
@@ -1947,7 +1949,7 @@ impl<'a> TcpSocket<'a> {
             self.timer.set_for_retransmit(timestamp, self.rtte.retransmission_timeout());
         }
 
-        if self.state == State::Closed {
+        if self.state.load() == State::Closed {
             // When aborting a connection, forget about it after sending a single RST packet.
             self.local_endpoint = IpEndpoint::default();
             self.remote_endpoint = IpEndpoint::default();
@@ -1965,7 +1967,7 @@ impl<'a> TcpSocket<'a> {
         } else if self.remote_last_ts.is_none() {
             // Socket stopped being quiet recently, we need to acquire a timestamp.
             PollAt::Now
-        } else if self.state == State::Closed {
+        } else if self.state.load() == State::Closed {
             // Socket was aborted, we have an RST packet to transmit.
             PollAt::Now
         } else if self.seq_to_transmit() {
@@ -2209,7 +2211,7 @@ mod test {
         rx_len: usize,
     ) -> TcpSocket<'static> {
         let mut s = socket_with_buffer_sizes(tx_len, rx_len);
-        s.state = State::SynReceived;
+        s.state.store(State::SynReceived);
         s.local_endpoint = LOCAL_END;
         s.remote_endpoint = REMOTE_END;
         s.local_seq_no = LOCAL_SEQ;
@@ -2225,7 +2227,7 @@ mod test {
 
     fn socket_syn_sent() -> TcpSocket<'static> {
         let mut s = socket();
-        s.state = State::SynSent;
+        s.state.store(State::SynSent);
         s.local_endpoint = IpEndpoint::new(MOCK_UNSPECIFIED, LOCAL_PORT);
         s.remote_endpoint = REMOTE_END;
         s.local_seq_no = LOCAL_SEQ;
@@ -2235,7 +2237,7 @@ mod test {
 
     fn socket_syn_sent_with_local_ipendpoint(local: IpEndpoint) -> TcpSocket<'static> {
         let mut s = socket();
-        s.state = State::SynSent;
+        s.state.store(State::SynSent);
         s.local_endpoint = local;
         s.remote_endpoint = REMOTE_END;
         s.local_seq_no = LOCAL_SEQ;
@@ -2245,7 +2247,7 @@ mod test {
 
     fn socket_established_with_buffer_sizes(tx_len: usize, rx_len: usize) -> TcpSocket<'static> {
         let mut s = socket_syn_received_with_buffer_sizes(tx_len, rx_len);
-        s.state = State::Established;
+        s.state.store(State::Established);
         s.local_seq_no = LOCAL_SEQ + 1;
         s.remote_last_seq = LOCAL_SEQ + 1;
         s.remote_last_ack = Some(REMOTE_SEQ + 1);
@@ -2259,13 +2261,13 @@ mod test {
 
     fn socket_fin_wait_1() -> TcpSocket<'static> {
         let mut s = socket_established();
-        s.state = State::FinWait1;
+        s.state.store( State::FinWait1) ;
         s
     }
 
     fn socket_fin_wait_2() -> TcpSocket<'static> {
         let mut s = socket_fin_wait_1();
-        s.state = State::FinWait2;
+        s.state.store( State::FinWait2);
         s.local_seq_no = LOCAL_SEQ + 1 + 1;
         s.remote_last_seq = LOCAL_SEQ + 1 + 1;
         s
@@ -2273,7 +2275,7 @@ mod test {
 
     fn socket_closing() -> TcpSocket<'static> {
         let mut s = socket_fin_wait_1();
-        s.state = State::Closing;
+        s.state.store(State::Closing);
         s.remote_last_seq = LOCAL_SEQ + 1 + 1;
         s.remote_seq_no = REMOTE_SEQ + 1 + 1;
         s
@@ -2281,7 +2283,7 @@ mod test {
 
     fn socket_time_wait(from_closing: bool) -> TcpSocket<'static> {
         let mut s = socket_fin_wait_2();
-        s.state = State::TimeWait;
+        s.state.store( State::TimeWait);
         s.remote_seq_no = REMOTE_SEQ + 1 + 1;
         if from_closing {
             s.remote_last_ack = Some(REMOTE_SEQ + 1 + 1);
@@ -2292,7 +2294,7 @@ mod test {
 
     fn socket_close_wait() -> TcpSocket<'static> {
         let mut s = socket_established();
-        s.state = State::CloseWait;
+        s.state.store(State::CloseWait);
         s.remote_seq_no = REMOTE_SEQ + 1 + 1;
         s.remote_last_ack = Some(REMOTE_SEQ + 1 + 1);
         s
@@ -2300,7 +2302,7 @@ mod test {
 
     fn socket_last_ack() -> TcpSocket<'static> {
         let mut s = socket_close_wait();
-        s.state = State::LastAck;
+        s.state.store(State::LastAck);
         s
     }
 
@@ -2361,7 +2363,7 @@ mod test {
     // =========================================================================================//
     fn socket_listen() -> TcpSocket<'static> {
         let mut s = socket();
-        s.state = State::Listen;
+        s.state.store(State::Listen);
         s.local_endpoint = IpEndpoint::new(IpAddress::default(), LOCAL_PORT);
         s
     }
@@ -2421,7 +2423,7 @@ mod test {
             (1048576, 5),
         ] {
             let mut s = socket_with_buffer_sizes(64, *buffer_size);
-            s.state = State::Listen;
+            s.state.store(State::Listen);
             s.local_endpoint = IpEndpoint::new(IpAddress::default(), LOCAL_PORT);
             assert_eq!(s.remote_win_shift, *shift_amt);
             send!(s, TcpRepr {
@@ -2774,7 +2776,7 @@ mod test {
         });
         assert_eq!(s.state, State::Closed);
     }
-
+State::Listen
     #[test]
     fn test_syn_sent_rst_no_ack() {
         let mut s = socket_syn_sent();
