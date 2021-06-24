@@ -361,7 +361,7 @@ pub struct TcpSocket<'a> {
 
     read_buffer: Option<SocketBufferSender>,
     write_buffer: Option<SocketBufferReceiver>,
-    temp_write_value: Option<Cursor<Vec<u8>>>
+    temp_write_value: Option<Cursor<Vec<u8>>>,
 }
 
 const DEFAULT_MSS: usize = 536;
@@ -422,7 +422,7 @@ impl<'a> TcpSocket<'a> {
             tx_waker: WakerRegistration::new(),
             read_buffer: None,
             write_buffer: None,
-            temp_write_value: None
+            temp_write_value: None,
         }
     }
 
@@ -615,6 +615,8 @@ impl<'a> TcpSocket<'a> {
         self.remote_last_ts = None;
         self.ack_delay = Some(ACK_DELAY_DEFAULT);
         self.ack_delay_until = None;
+        self.temp_write_value = None;
+
         #[cfg(feature = "async")]
             {
                 self.rx_waker.wake();
@@ -1006,7 +1008,7 @@ impl<'a> TcpSocket<'a> {
         self.read_buffer = Some(tx);
         rx
     }
-    pub fn sync_write_buffer(&mut self) -> Result<()> {
+    pub fn sync_write_buffer(&mut self) {
         if let Some(rx) = self.write_buffer.as_mut() {
             let buf = if let Some(last) = self.temp_write_value.take() {
                 Some(last)
@@ -1020,24 +1022,20 @@ impl<'a> TcpSocket<'a> {
                 }
             };
             if let Some(mut buf) = buf {
-                match self.send_slice(&buf.get_ref().as_slice()[..buf.position() as usize]) {
-                    Ok(enqueued) if enqueued == buf.get_ref().len() => {
-
-                    }
-                    Ok(enqueued)  => {
+                let result = self.send_slice(&buf.get_ref().as_slice()[buf.position() as usize..]);
+                match result {
+                    Ok(enqueued) if enqueued == buf.get_ref().len() => {}
+                    Ok(enqueued) => {
                         buf.set_position(buf.position() + enqueued as u64);
                         self.temp_write_value = Some(buf);
                     }
                     Err(Error::Exhausted) => {
                         self.temp_write_value = Some(buf);
                     }
-                    Err(e) => {
-                        return Err(e)
-                    }
+                    Err(_e) => {}
                 }
             }
         }
-        Ok(())
     }
     pub fn sync_read_buffer(&mut self) {
         if self.read_buffer.is_some() {
@@ -1543,7 +1541,7 @@ impl<'a> TcpSocket<'a> {
                        ack_len, self.tx_buffer.len() - ack_len);
             self.tx_buffer.dequeue_allocated(ack_len);
 
-            self.sync_write_buffer()?;
+            self.sync_write_buffer();
 
             // There's new room available in tx_buffer, wake the waiting task if any.
             #[cfg(feature = "async")]
@@ -1745,7 +1743,7 @@ impl<'a> TcpSocket<'a> {
                               emit: F) -> Result<()>
         where F: FnOnce((IpRepr, TcpRepr)) -> Result<()> {
         if !self.remote_endpoint.is_specified() { return Err(Error::Exhausted); }
-        self.sync_write_buffer()?;
+        self.sync_write_buffer();
 
         if self.remote_last_ts.is_none() {
             // We get here in exactly two cases:
@@ -2288,13 +2286,13 @@ mod test {
 
     fn socket_fin_wait_1() -> TcpSocket<'static> {
         let s = socket_established();
-        s.state.store( State::FinWait1) ;
+        s.state.store(State::FinWait1);
         s
     }
 
     fn socket_fin_wait_2() -> TcpSocket<'static> {
         let mut s = socket_fin_wait_1();
-        s.state.store( State::FinWait2);
+        s.state.store(State::FinWait2);
         s.local_seq_no = LOCAL_SEQ + 1 + 1;
         s.remote_last_seq = LOCAL_SEQ + 1 + 1;
         s
@@ -2310,7 +2308,7 @@ mod test {
 
     fn socket_time_wait(from_closing: bool) -> TcpSocket<'static> {
         let mut s = socket_fin_wait_2();
-        s.state.store( State::TimeWait);
+        s.state.store(State::TimeWait);
         s.remote_seq_no = REMOTE_SEQ + 1 + 1;
         if from_closing {
             s.remote_last_ack = Some(REMOTE_SEQ + 1 + 1);

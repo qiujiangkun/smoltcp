@@ -178,7 +178,7 @@ impl<'a> Set<'a> {
     pub fn prune(&mut self) {
         let mut to_remove = Vec::new();
         for (&handle, tcp_socket) in &self.tcp_sockets {
-            if tcp_socket.is_open() {
+            if !tcp_socket.is_open() {
                 to_remove.push(handle);
             }
         }
