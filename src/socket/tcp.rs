@@ -1236,20 +1236,20 @@ impl<'a> TcpSocket<'a> {
                 let mut segment_in_window = true;
 
                 if window_start == window_end && segment_start != segment_end {
-                    net_debug!("{}:{}:{}: non-zero-length segment with zero receive window, \
+                    net_trace!("{}:{}:{}: non-zero-length segment with zero receive window, \
                                 will only send an ACK",
                                self.meta.handle, self.local_endpoint, self.remote_endpoint);
                     segment_in_window = false;
                 }
 
                 if segment_start == segment_end && segment_end == window_start - 1 {
-                    net_debug!("{}:{}:{}: received a keep-alive or window probe packet, \
+                    net_trace!("{}:{}:{}: received a keep-alive or window probe packet, \
                                 will send an ACK",
                                self.meta.handle, self.local_endpoint, self.remote_endpoint);
                     segment_in_window = false;
                 } else if !((window_start <= segment_start && segment_start <= window_end) &&
                     (window_start <= segment_end && segment_end <= window_end)) {
-                    net_debug!("{}:{}:{}: segment not in receive window \
+                    net_trace!("{}:{}:{}: segment not in receive window \
                                 ({}..{} not intersecting {}..{}), will send challenge ACK",
                                self.meta.handle, self.local_endpoint, self.remote_endpoint,
                                segment_start, segment_end, window_start, window_end);
