@@ -1611,7 +1611,7 @@ impl<'a> InterfaceInner<'a> {
                     Err(e) => return Err(e)
                 }
             } else {
-                net_debug!("Matched tcp socket but not accepted {:?} {:?}", handle, tcp_socket);
+                net_debug!("Matched tcp socket but not accepted {:?} {:?} {:?}", handle, tcp_socket.local_endpoint(), tcp_socket.remote_endpoint());
             }
         }
 

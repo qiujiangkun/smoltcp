@@ -18,11 +18,11 @@ pub struct SocketBufferReceiver<'a> {
     pub(crate) meta: SocketMeta
 }
 
-impl<'a> Drop for SocketBufferReceiver<'a> {
-    fn drop(&mut self) {
-        net_debug!("SocketBufferReceiver dropped\n{:?}", backtrace::Backtrace::new());
-    }
-}
+// impl<'a> Drop for SocketBufferReceiver<'a> {
+//     fn drop(&mut self) {
+//         net_debug!("SocketBufferReceiver dropped\n{:?}", backtrace::Backtrace::new());
+//     }
+// }
 
 impl<'a> SocketBufferReceiver<'a> {
     fn recv_impl<'b, F, R>(&'b mut self, f: F) -> Result<R>
