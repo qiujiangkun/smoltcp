@@ -13,6 +13,7 @@ impl WakerRegistration {
 
     /// Register a waker. Overwrites the previous waker, if any.
     #[allow(dead_code)]
+    #[deprecated]
     pub fn register(&mut self, w: &Waker) {
         match self.waker {
             // Optimization: If both the old and new Wakers wake the same task, we can simply

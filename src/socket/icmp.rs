@@ -103,8 +103,8 @@ impl<'a> IcmpSocket<'a> {
     /// - "Spurious wakes" are allowed: a wake doesn't guarantee the result of `recv` has
     ///   necessarily changed.
     #[cfg(feature = "async")]
-    pub fn register_recv_waker(&mut self, waker: &Waker) {
-        self.rx_waker.register(waker)
+    pub fn register_recv_waker(&mut self, waker: Waker) {
+        self.rx_waker.register_set(waker)
     }
 
     /// Register a waker for send operations.
@@ -121,8 +121,8 @@ impl<'a> IcmpSocket<'a> {
     /// - "Spurious wakes" are allowed: a wake doesn't guarantee the result of `send` has
     ///   necessarily changed.
     #[cfg(feature = "async")]
-    pub fn register_send_waker(&mut self, waker: &Waker) {
-        self.tx_waker.register(waker)
+    pub fn register_send_waker(&mut self, waker: Waker) {
+        self.tx_waker.register_set(waker)
     }
 
     /// Return the socket handle.
@@ -225,8 +225,8 @@ impl<'a> IcmpSocket<'a> {
 
         #[cfg(feature = "async")]
         {
-            self.rx_waker.wake();
-            self.tx_waker.wake();
+            self.rx_waker.wake_by_ref();
+            self.tx_waker.wake_by_ref();
         }
 
         Ok(())
@@ -396,7 +396,7 @@ impl<'a> IcmpSocket<'a> {
         }
 
         #[cfg(feature = "async")]
-        self.rx_waker.wake();
+        self.rx_waker.wake_by_ref();
 
         Ok(())
     }
@@ -442,7 +442,7 @@ impl<'a> IcmpSocket<'a> {
         })?;
 
         #[cfg(feature = "async")]
-        self.tx_waker.wake();
+        self.tx_waker.wake_by_ref();
 
         Ok(())
     }
