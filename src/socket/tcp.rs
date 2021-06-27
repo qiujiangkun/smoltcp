@@ -359,6 +359,7 @@ pub struct TcpSocket<'a> {
     #[cfg(feature = "async")]
     tx_waker: WakerRegistration,
 
+    read_buffer: Option<crossbeam::channel::Sender<Vec<u8>>>
 }
 
 const DEFAULT_MSS: usize = 536;
@@ -417,6 +418,7 @@ impl<'a> TcpSocket<'a> {
             rx_waker: WakerRegistration::new(),
             #[cfg(feature = "async")]
             tx_waker: WakerRegistration::new(),
+            read_buffer: None
         }
     }
 
@@ -1001,6 +1003,27 @@ impl<'a> TcpSocket<'a> {
             meta: self.meta
         }
     }
+    pub fn set_sync_read_buffer_cb(&mut self, sender: crossbeam::channel::Sender<Vec<u8>>) {
+        self.read_buffer = Some(sender);
+    }
+    pub fn sync_read_buffer(&mut self) {
+        if self.read_buffer.is_some() {
+            let vec = self.recv(|buf| {
+                if buf.len() > 0 {
+                    let vec = buf.to_vec();
+                    (buf.len(), Some(vec))
+                } else {
+                    (buf.len(), None)
+                }
+            });
+            match vec {
+                Ok(Some(vec)) => {
+                    self.read_buffer.as_ref().unwrap().send(vec).unwrap();
+                }
+                _ => {}
+            }
+        }
+    }
     fn set_state(&mut self, state: State) {
         if self.state.load() != state {
             if self.remote_endpoint.addr.is_unspecified() {
@@ -1577,6 +1600,7 @@ impl<'a> TcpSocket<'a> {
             // There's new data in rx_buffer, notify waiting task if any.
             #[cfg(feature = "async")]
                 self.rx_waker.wake_by_ref();
+            self.sync_read_buffer();
         }
 
         if !self.assembler.is_empty() {
