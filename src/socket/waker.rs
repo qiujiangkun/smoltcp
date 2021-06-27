@@ -12,6 +12,7 @@ impl WakerRegistration {
     }
 
     /// Register a waker. Overwrites the previous waker, if any.
+    #[allow(dead_code)]
     pub fn register(&mut self, w: &Waker) {
         match self.waker {
             // Optimization: If both the old and new Wakers wake the same task, we can simply
@@ -25,9 +26,20 @@ impl WakerRegistration {
             _ => self.waker = Some(w.clone()),
         }
     }
-
+    /// Register a waker. Overwrites the previous waker, if any.
+    pub fn register_set(&mut self, w: Waker) {
+        self.waker = Some(w);
+    }
     /// Wake the registered waker, if any.
+    #[deprecated]
+    #[allow(dead_code)]
     pub fn wake(&mut self) {
         self.waker.take().map(|w| w.wake());
     }
+
+    /// Wake the registered waker, if any.
+    pub fn wake_by_ref(&mut self) {
+        self.waker.as_ref().map(|w| w.wake_by_ref());
+    }
+
 }

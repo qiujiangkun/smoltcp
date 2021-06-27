@@ -433,8 +433,8 @@ impl<'a> TcpSocket<'a> {
     /// - "Spurious wakes" are allowed: a wake doesn't guarantee the result of `recv` has
     ///   necessarily changed.
     #[cfg(feature = "async")]
-    pub fn register_recv_waker(&mut self, waker: &Waker) {
-        self.rx_waker.register(waker)
+    pub fn register_recv_waker(&mut self, waker: Waker) {
+        self.rx_waker.register_set(waker)
     }
 
     /// Register a waker for send operations.
@@ -451,8 +451,8 @@ impl<'a> TcpSocket<'a> {
     /// - "Spurious wakes" are allowed: a wake doesn't guarantee the result of `send` has
     ///   necessarily changed.
     #[cfg(feature = "async")]
-    pub fn register_send_waker(&mut self, waker: &Waker) {
-        self.tx_waker.register(waker)
+    pub fn register_send_waker(&mut self, waker: Waker) {
+        self.tx_waker.register_set(waker)
     }
 
     /// Return the socket handle.
@@ -612,8 +612,8 @@ impl<'a> TcpSocket<'a> {
 
         #[cfg(feature = "async")]
             {
-                self.rx_waker.wake();
-                self.tx_waker.wake();
+                self.rx_waker.wake_by_ref();
+                self.tx_waker.wake_by_ref();
             }
     }
 
@@ -1021,8 +1021,8 @@ impl<'a> TcpSocket<'a> {
                 // Wake all tasks waiting. Even if we haven't received/sent data, this
                 // is needed because return values of functions may change depending on the state.
                 // For example, a pending read has to fail with an error if the socket is closed.
-                self.rx_waker.wake();
-                self.tx_waker.wake();
+                self.rx_waker.wake_by_ref();
+                self.tx_waker.wake_by_ref();
             }
     }
 
@@ -1489,7 +1489,7 @@ impl<'a> TcpSocket<'a> {
 
             // There's new room available in tx_buffer, wake the waiting task if any.
             #[cfg(feature = "async")]
-                self.tx_waker.wake();
+                self.tx_waker.wake_by_ref();
         }
 
         if let Some(ack_number) = repr.ack_number {
@@ -1576,7 +1576,7 @@ impl<'a> TcpSocket<'a> {
             self.rx_buffer.enqueue_unallocated(contig_len);
             // There's new data in rx_buffer, notify waiting task if any.
             #[cfg(feature = "async")]
-                self.rx_waker.wake();
+                self.rx_waker.wake_by_ref();
         }
 
         if !self.assembler.is_empty() {
