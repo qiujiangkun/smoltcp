@@ -6,16 +6,16 @@ use managed::ManagedSlice;
 use crate::{Error, Result};
 use crate::storage::Resettable;
 use std::sync::Arc;
-use crate::wire::{AtomicTcpSeqNumber, IpEndpoint};
+use crate::wire::{IpEndpoint};
 use crate::socket::SocketMeta;
 
 #[derive(Debug)]
 pub struct SocketBufferReceiver<'a> {
     pub(crate) rx_buffer: Arc<RingBufferSync<'a, u8>>,
-    pub(crate) remote_seq_no: Arc<AtomicTcpSeqNumber>,
+    pub(crate) remote_seq_no: Arc<AtomicUsize>,
     pub(crate) local_endpoint: IpEndpoint,
     pub(crate) remote_endpoint: IpEndpoint,
-    pub(crate) meta: SocketMeta
+    pub(crate) meta: SocketMeta,
 }
 
 // impl<'a> Drop for SocketBufferReceiver<'a> {
@@ -31,7 +31,7 @@ impl<'a> SocketBufferReceiver<'a> {
 
         let _old_length = self.rx_buffer.len();
         let (size, result) = f(&self.rx_buffer);
-        self.remote_seq_no.add_assign(size);
+        self.remote_seq_no.fetch_add(size, Ordering::AcqRel);
         if size > 0 {
             #[cfg(any(test, feature = "verbose"))]
             net_trace!("{}:{}:{}: rx buffer: dequeueing {} octets (now {})",

@@ -67,64 +67,6 @@ impl cmp::PartialOrd for SeqNumber {
     }
 }
 
-/// A TCP sequence number.
-///
-/// A sequence number is a monotonically advancing integer modulo 2<sup>32</sup>.
-/// Sequence numbers do not have a discontiguity when compared pairwise across a signed overflow.
-#[derive(Debug, Default)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct AtomicSeqNumber(pub AtomicI32);
-impl AtomicSeqNumber {
-    pub fn to_raw(&self) -> SeqNumber {
-        SeqNumber(self.0.load(Ordering::Acquire))
-    }
-
-    pub fn add(&self, rhs: usize) -> AtomicSeqNumber {
-        if rhs > i32::MAX as usize {
-            panic!("attempt to add to sequence number with unsigned overflow")
-        }
-        AtomicSeqNumber(AtomicI32::new(self.0.load(Ordering::Acquire).wrapping_add(rhs as i32)))
-    }
-
-    pub fn sub(&self, rhs: usize) -> AtomicSeqNumber {
-        if rhs > i32::MAX as usize {
-            panic!("attempt to subtract to sequence number with unsigned overflow")
-        }
-        AtomicSeqNumber(AtomicI32::new(self.0.load(Ordering::Acquire).wrapping_sub(rhs as i32)))
-    }
-
-    pub fn sub_self(&self, rhs: AtomicSeqNumber) -> usize {
-        let result = self.0.load(Ordering::Acquire).wrapping_sub(rhs.0.load(Ordering::Acquire));
-        if result < 0 {
-            panic!("attempt to subtract sequence numbers with underflow")
-        }
-        result as usize
-    }
-    pub fn add_assign(&self, rhs: usize) {
-        if rhs > i32::MAX as usize {
-            panic!("attempt to add to sequence number with unsigned overflow")
-        }
-        self.0.fetch_add(rhs as i32, Ordering::AcqRel);
-    }
-}
-impl PartialEq for AtomicSeqNumber {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.load(Ordering::Acquire).eq(&other.0.load(Ordering::Acquire))
-    }
-}
-
-impl Eq for AtomicSeqNumber {}
-
-impl PartialOrd for AtomicSeqNumber {
-    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        self.0.load(Ordering::Acquire).wrapping_sub(other.0.load(Ordering::Acquire)).partial_cmp(&0)
-    }
-}
-impl Clone for AtomicSeqNumber {
-    fn clone(&self) -> Self {
-        AtomicSeqNumber(AtomicI32::new(self.0.load(Ordering::Acquire)))
-    }
-}
 /// A read/write wrapper around a Transmission Control Protocol packet buffer.
 #[derive(Debug, PartialEq, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -1071,7 +1013,6 @@ impl<'a> fmt::Display for Repr<'a> {
 }
 
 use crate::wire::pretty_print::{PrettyPrint, PrettyIndent};
-use std::sync::atomic::{AtomicI32, Ordering};
 
 impl<T: AsRef<[u8]>> PrettyPrint for Packet<T> {
     fn pretty_print(buffer: &dyn AsRef<[u8]>, f: &mut fmt::Formatter,
