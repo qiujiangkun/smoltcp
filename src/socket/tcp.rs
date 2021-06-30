@@ -1013,7 +1013,7 @@ impl<'a> TcpSocket<'a> {
     }
     pub fn sync_read_buffer(&mut self) {
         if self.read_buffer.is_some() {
-            if self.recv_queue() > 0 {
+            if self.recv_queue() > 0 && !self.read_buffer.as_ref().unwrap().is_full() {
                 #[allow(unsafe_code)]
                 let mut data = self.pool.alloc_with(|x| unsafe {
                     *x = MaybeUninit::new(FixedBuffer::new());
@@ -1026,7 +1026,10 @@ impl<'a> TcpSocket<'a> {
                 });
                 match vec {
                     Ok(vec) => {
-                        self.read_buffer.as_ref().unwrap().send(vec);
+                        match self.read_buffer.as_ref().unwrap().send(vec) {
+                            Ok(_) => {}
+                            Err(_) => unreachable!()
+                        }
                     }
                     _ => {}
                 }

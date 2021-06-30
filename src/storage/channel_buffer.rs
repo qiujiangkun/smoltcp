@@ -1,10 +1,12 @@
 use std::mem::MaybeUninit;
+use std::sync::{Arc, Weak};
 
 #[repr(C)]
 pub struct FixedBuffer<const SIZE: usize> {
     len: usize,
     content: [u8; SIZE],
 }
+
 #[allow(unsafe_code)]
 impl<const SIZE: usize> FixedBuffer<SIZE> {
     pub fn new() -> FixedBuffer<SIZE> {
@@ -47,6 +49,7 @@ impl<const SIZE: usize> FixedBuffer<SIZE> {
         this
     }
 }
+
 impl<const SIZE: usize> AsRef<[u8]> for FixedBuffer<SIZE> {
     fn as_ref(&self) -> &[u8] {
         &self.content[..self.len]
@@ -61,35 +64,48 @@ impl<const SIZE: usize> Default for FixedBuffer<SIZE> {
 
 pub type ChannelBufferContent = shared_arena::ArenaBox<FixedBuffer<1600>>;
 
+pub fn channel_buffer_pair() -> (ChannelBufferSender, ChannelBufferReceiver) {
+    let queue = Arc::new(crossbeam::queue::ArrayQueue::new(128));
+    let weak = Arc::downgrade(&queue);
+    (ChannelBufferSender::new(queue), ChannelBufferReceiver::new(weak))
+}
+
 #[derive(Debug)]
 pub struct ChannelBufferSender {
-    tx: crossbeam::channel::Sender<ChannelBufferContent>,
+    tx: Arc<crossbeam::queue::ArrayQueue<ChannelBufferContent>>,
 }
 
 impl ChannelBufferSender {
-    pub fn new(tx: crossbeam::channel::Sender<ChannelBufferContent>) -> Self {
+    pub fn new(tx: Arc<crossbeam::queue::ArrayQueue<ChannelBufferContent>>) -> Self {
         Self {
             tx
         }
     }
-    pub fn send(&self, content: ChannelBufferContent) {
-        let _ = self.tx.send(content);
+    pub fn send(&self, content: ChannelBufferContent) -> Result<(), ChannelBufferContent> {
+        self.tx.push(content)
+    }
+    pub fn is_full(&self) -> bool {
+        self.tx.is_full()
     }
 }
 
 #[derive(Debug)]
 pub struct ChannelBufferReceiver {
-    rx: crossbeam::channel::Receiver<ChannelBufferContent>,
+    rx: Weak<crossbeam::queue::ArrayQueue<ChannelBufferContent>>,
 }
 
 impl ChannelBufferReceiver {
-    pub fn new(rx: crossbeam::channel::Receiver<ChannelBufferContent>) -> Self {
+    pub fn new(rx: Weak<crossbeam::queue::ArrayQueue<ChannelBufferContent>>) -> Self {
         Self {
             rx
         }
     }
     pub fn try_recv(&self) -> Result<ChannelBufferContent, crossbeam::channel::TryRecvError> {
-        self.rx.try_recv()
+        if let Some(rx) = self.rx.upgrade() {
+            rx.pop().ok_or(crossbeam::channel::TryRecvError::Empty)
+        } else {
+            Err(crossbeam::channel::TryRecvError::Disconnected)
+        }
     }
 }
 
