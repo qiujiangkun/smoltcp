@@ -934,7 +934,7 @@ impl<'a> TcpSocket<'a> {
     /// In all other cases, `Err(Error::Illegal)` is returned and previously received data (if any)
     /// may be incomplete (truncated).
     pub fn recv<'b, F, R>(&'b mut self, f: F) -> Result<R>
-        where F: FnOnce(&'b mut [u8]) -> (usize, R) {
+        where F: FnOnce(&'b [u8]) -> (usize, R) {
         self.recv_impl(|rx_buffer| {
             rx_buffer.dequeue_many_with(f)
         })

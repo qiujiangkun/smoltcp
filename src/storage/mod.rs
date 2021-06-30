@@ -15,7 +15,10 @@ pub use self::assembler::Assembler;
 pub use self::ring_buffer::RingBuffer;
 pub use self::ring_buffer_sync::*;
 pub use self::packet_buffer::{PacketBuffer, PacketMetadata};
+#[cfg(not(feature = "slow_buffer_sync"))]
 pub use self::channel_buffer::*;
+#[cfg(feature = "slow_buffer_sync")]
+pub use self::channel_buffer_slow::*;
 
 /// A trait for setting a value to a known state.
 ///
