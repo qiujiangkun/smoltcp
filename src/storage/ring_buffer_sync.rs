@@ -859,7 +859,7 @@ mod test {
     }
 
     #[test]
-    fn read_write_async() {
+    fn read_write_mt() {
         let segment = b"abcdef";
         let count = 200;
         let writer = Arc::new(RingBufferSync::new(vec![0u8; segment.len() * count]));

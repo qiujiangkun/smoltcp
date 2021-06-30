@@ -9,11 +9,13 @@ mod assembler;
 mod ring_buffer;
 mod packet_buffer;
 mod ring_buffer_sync;
+mod channel_buffer;
 
 pub use self::assembler::Assembler;
 pub use self::ring_buffer::RingBuffer;
 pub use self::ring_buffer_sync::*;
 pub use self::packet_buffer::{PacketBuffer, PacketMetadata};
+pub use self::channel_buffer::*;
 
 /// A trait for setting a value to a known state.
 ///
