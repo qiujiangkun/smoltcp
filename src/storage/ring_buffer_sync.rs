@@ -699,4 +699,33 @@ mod test {
         let large = ring.enqueue_many(8);
         assert_eq!(large.len(), 8);
     }
+
+    #[test]
+    fn read_write_async() {
+        let segment = b"abcdef";
+        let count = 666;
+        let writer = Arc::new(RingBufferSync::new(vec![0u8; segment.len() * count]));
+        let reader = Arc::clone(&writer);
+        let t1 = std::thread::spawn(move || {
+            for _i in 0..count {
+                writer.enqueue_slice(segment);
+            }
+        });
+        let t2 = std::thread::spawn(move || {
+            let mut i = 0;
+            while i < count {
+                reader.dequeue_many_with(|x| {
+                    if x.len() >= segment.len() {
+                        assert_eq!(&x[..segment.len()], segment);
+                        i += 1;
+                        (segment.len(), ())
+                    } else {
+                        (0, ())
+                    }
+                });
+            }
+        });
+        t1.join().unwrap();
+        t2.join().unwrap();
+    }
 }
