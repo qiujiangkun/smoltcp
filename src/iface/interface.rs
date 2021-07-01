@@ -13,6 +13,7 @@ use crate::socket::*;
 #[cfg(feature = "medium-ethernet")]
 use crate::iface::{NeighborCache, NeighborAnswer};
 use crate::iface::Routes;
+#[allow(unused_imports)]
 use std::sync::atomic::{Ordering, AtomicUsize};
 
 /// A  network interface.
@@ -610,14 +611,14 @@ impl<'a, DeviceT> Interface<'a, DeviceT>
     fn socket_ingress(&mut self, sockets: &mut SocketSet, timestamp: Instant) -> bool {
         let mut processed_any = false;
         let &mut Self { ref mut device, ref mut inner } = self;
-        let lock = ETH_PACKET_COUNTS.read().unwrap();
-        let count = lock.get(&inner.ethernet_addr.unwrap()).unwrap();
+        // let lock = ETH_PACKET_COUNTS.read().unwrap();
+        // let count = lock.get(&inner.ethernet_addr.unwrap()).unwrap();
         while let Some((rx_token, tx_token)) = device.receive() {
             if let Err(err) = rx_token.consume(timestamp, |frame| {
                 match inner.device_capabilities.medium {
                     #[cfg(feature = "medium-ethernet")]
                     Medium::Ethernet => {
-                        count.fetch_add(1, Ordering::AcqRel);
+                        // count.fetch_add(1, Ordering::AcqRel);
                         match inner.process_ethernet(sockets, timestamp, &frame) {
                             Ok(response) => {
                                 processed_any = true;
