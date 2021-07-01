@@ -25,6 +25,7 @@ defmt = { version = "0.2.0", optional = true }
 crossbeam = { version = "*" }
 backtrace = "0.3"
 shared_arena = "0.8"
+lazy_static = "*"
 
 [dev-dependencies]
 env_logger = "0.5"

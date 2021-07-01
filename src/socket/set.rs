@@ -211,7 +211,7 @@ impl<'a> Set<'a> {
             }
         }
     }
-    pub fn iter_tcp(&self) -> impl Iterator<Item = &TcpSocket> {
+    pub fn iter_tcp(&self) -> impl Iterator<Item = &TcpSocket<'a>> {
         self.tcp_sockets.values()
     }
     pub fn iter_tcp_mut(&mut self) -> impl Iterator<Item = &mut TcpSocket<'a>> {

@@ -335,7 +335,7 @@ impl<'a, T: 'a> RingBufferSync<'a, T> {
         where F: FnOnce(&'b [T]) -> (usize, R) {
         let capacity = self.capacity();
         let max_size = cmp::min(self.len(), capacity - self.read_at.load(Ordering::Acquire));
-        let (size, result) = f(self.storage[self.read_at.load(Ordering::Acquire)..self.read_at.load(Ordering::Acquire) + max_size].as_mut_unsafe());
+        let (size, result) = f(&self.storage[self.read_at.load(Ordering::Acquire)..self.read_at.load(Ordering::Acquire) + max_size]);
         assert!(size <= max_size);
         self.read_at.store(if capacity > 0 {
             (self.read_at.load(Ordering::Acquire) + size) % capacity

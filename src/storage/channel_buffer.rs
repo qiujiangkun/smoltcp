@@ -107,5 +107,12 @@ impl ChannelBufferReceiver {
             Err(crossbeam::channel::TryRecvError::Disconnected)
         }
     }
+    pub fn len(&self) -> usize {
+        if let Some(rx) = self.rx.upgrade() {
+            rx.len()
+        } else {
+            0
+        }
+    }
 }
 

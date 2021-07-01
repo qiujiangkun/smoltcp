@@ -13,6 +13,7 @@ use crate::socket::*;
 #[cfg(feature = "medium-ethernet")]
 use crate::iface::{NeighborCache, NeighborAnswer};
 use crate::iface::Routes;
+use std::sync::atomic::{Ordering, AtomicUsize};
 
 /// A  network interface.
 ///
@@ -220,6 +221,7 @@ let iface = InterfaceBuilder::new(device)
                 (None, None)
             }
         };
+        ETH_PACKET_COUNTS.write().unwrap().insert(ethernet_addr.unwrap(), AtomicUsize::new(0));
 
         Interface {
             device: self.device,
@@ -358,7 +360,11 @@ fn icmp_reply_payload_len(len: usize, mtu: usize, header_len: usize) -> usize {
     // <min mtu> - IP Header Size * 2 - ICMPv4 DstUnreachable hdr size
     cmp::min(len, mtu - header_len * 2 - 8)
 }
-
+lazy_static::lazy_static! {
+    pub static ref ETH_PACKET_COUNTS:
+    std::sync::RwLock<std::collections::HashMap<EthernetAddress, std::sync::atomic::AtomicUsize>>
+    = std::sync::RwLock::new(Default::default());
+}
 #[cfg(feature = "proto-igmp")]
 enum IgmpReportState {
     Inactive,
@@ -604,11 +610,14 @@ impl<'a, DeviceT> Interface<'a, DeviceT>
     fn socket_ingress(&mut self, sockets: &mut SocketSet, timestamp: Instant) -> bool {
         let mut processed_any = false;
         let &mut Self { ref mut device, ref mut inner } = self;
+        let lock = ETH_PACKET_COUNTS.read().unwrap();
+        let count = lock.get(&inner.ethernet_addr.unwrap()).unwrap();
         while let Some((rx_token, tx_token)) = device.receive() {
             if let Err(err) = rx_token.consume(timestamp, |frame| {
                 match inner.device_capabilities.medium {
                     #[cfg(feature = "medium-ethernet")]
                     Medium::Ethernet => {
+                        count.fetch_add(1, Ordering::AcqRel);
                         match inner.process_ethernet(sockets, timestamp, &frame) {
                             Ok(response) => {
                                 processed_any = true;
@@ -1621,7 +1630,6 @@ impl<'a> InterfaceInner<'a> {
         } else {
             Ok(Some(IpPacket::Tcp(TcpSocket::rst_reply(&ip_repr, &tcp_repr))))
         }
-
     }
 
     #[cfg(feature = "medium-ethernet")]
