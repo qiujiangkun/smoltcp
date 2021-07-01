@@ -19,4 +19,4 @@ pub use self::neighbor::Cache as NeighborCache;
 pub use self::route::{Route, Routes};
 
 #[cfg(any(feature = "medium-ethernet", feature = "medium-ip"))]
-pub use self::interface::{Interface, InterfaceBuilder};
+pub use self::interface::{Interface, InterfaceBuilder, ETH_PACKET_COUNTS};
