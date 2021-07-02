@@ -9,7 +9,7 @@ use core::task::Waker;
 use crate::{Error, Result};
 use crate::time::{Duration, Instant};
 use crate::socket::{SocketMeta, SocketHandle, PollAt};
-use crate::storage::{Assembler, RingBuffer, SocketBufferReceiver, RingBufferSync, ChannelBufferSender, FixedBuffer};
+use crate::storage::{Assembler, RingBuffer, RingBufferSync, ChannelBufferSender, FixedBuffer};
 #[cfg(feature = "async")]
 use crate::socket::WakerRegistration;
 use crate::wire::{IpProtocol, IpRepr, IpAddress, IpEndpoint, TcpSeqNumber, TcpRepr, TcpControl};
@@ -998,15 +998,6 @@ impl<'a> TcpSocket<'a> {
     }
     pub fn set_sync_write_buffer(&mut self) -> Arc<SocketBufferSync<'a>> {
         Arc::clone(&self.tx_buffer)
-    }
-    pub fn set_sync_read_buffer(&mut self) -> SocketBufferReceiver<'a> {
-        SocketBufferReceiver {
-            rx_buffer: Arc::clone(&self.rx_buffer),
-            remote_seq_no: Arc::clone(&self.exterior_remote_seq_no),
-            local_endpoint: self.local_endpoint,
-            remote_endpoint: self.remote_endpoint,
-            meta: self.meta,
-        }
     }
     pub fn set_sync_read_buffer_cb(&mut self, sender: ChannelBufferSender) {
         self.read_buffer = Some(sender);
