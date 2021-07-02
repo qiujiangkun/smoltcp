@@ -934,7 +934,7 @@ impl<'a> TcpSocket<'a> {
     /// In all other cases, `Err(Error::Illegal)` is returned and previously received data (if any)
     /// may be incomplete (truncated).
     pub fn recv<'b, F, R>(&'b mut self, f: F) -> Result<R>
-        where F: FnOnce(&'b [u8]) -> (usize, R) {
+        where F: FnOnce(&'b mut [u8]) -> (usize, R) {
         self.recv_impl(|rx_buffer| {
             rx_buffer.dequeue_many_with(f)
         })
@@ -999,7 +999,7 @@ impl<'a> TcpSocket<'a> {
     pub fn set_sync_write_buffer(&mut self) -> Arc<SocketBufferSync<'a>> {
         Arc::clone(&self.tx_buffer)
     }
-    pub fn set_sync_read_buffer_cb(&mut self, sender: ChannelBufferSender) {
+    pub fn set_sync_read_buffer(&mut self, sender: ChannelBufferSender) {
         self.read_buffer = Some(sender);
     }
     pub fn sync_read_buffer(&mut self) {

@@ -1,12 +1,9 @@
 #![allow(unsafe_code)]
 
-use std::sync::atomic::{Ordering, AtomicU32, AtomicU64, AtomicUsize};
+use std::sync::atomic::{Ordering, AtomicU32, AtomicU64};
 use core::cmp;
 use managed::ManagedSlice;
 use crate::{Result, Error};
-use std::sync::Arc;
-use crate::wire::{IpEndpoint};
-use crate::socket::SocketMeta;
 use std::fmt::{Debug, Formatter};
 
 #[repr(C)]
