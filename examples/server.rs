@@ -9,7 +9,7 @@ use std::str;
 use smoltcp::iface::{InterfaceBuilder, NeighborCache};
 use smoltcp::phy::{wait as phy_wait, Device, Medium};
 use smoltcp::socket::SocketSet;
-use smoltcp::socket::{TcpSocket, TcpSocketBuffer};
+use smoltcp::socket::{TcpSocket, TcpSocketBufferSync};
 use smoltcp::socket::{UdpPacketMetadata, UdpSocket, UdpSocketBuffer};
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
@@ -32,20 +32,20 @@ fn main() {
     let udp_tx_buffer = UdpSocketBuffer::new(vec![UdpPacketMetadata::EMPTY], vec![0; 128]);
     let udp_socket = UdpSocket::new(udp_rx_buffer, udp_tx_buffer);
 
-    let tcp1_rx_buffer = TcpSocketBuffer::new(vec![0; 64]);
-    let tcp1_tx_buffer = TcpSocketBuffer::new(vec![0; 128]);
+    let tcp1_rx_buffer = TcpSocketBufferSync::new(vec![0; 64]);
+    let tcp1_tx_buffer = TcpSocketBufferSync::new(vec![0; 128]);
     let tcp1_socket = TcpSocket::new(tcp1_rx_buffer, tcp1_tx_buffer);
 
-    let tcp2_rx_buffer = TcpSocketBuffer::new(vec![0; 64]);
-    let tcp2_tx_buffer = TcpSocketBuffer::new(vec![0; 128]);
+    let tcp2_rx_buffer = TcpSocketBufferSync::new(vec![0; 64]);
+    let tcp2_tx_buffer = TcpSocketBufferSync::new(vec![0; 128]);
     let tcp2_socket = TcpSocket::new(tcp2_rx_buffer, tcp2_tx_buffer);
 
-    let tcp3_rx_buffer = TcpSocketBuffer::new(vec![0; 65535]);
-    let tcp3_tx_buffer = TcpSocketBuffer::new(vec![0; 65535]);
+    let tcp3_rx_buffer = TcpSocketBufferSync::new(vec![0; 65535]);
+    let tcp3_tx_buffer = TcpSocketBufferSync::new(vec![0; 65535]);
     let tcp3_socket = TcpSocket::new(tcp3_rx_buffer, tcp3_tx_buffer);
 
-    let tcp4_rx_buffer = TcpSocketBuffer::new(vec![0; 65535]);
-    let tcp4_tx_buffer = TcpSocketBuffer::new(vec![0; 65535]);
+    let tcp4_rx_buffer = TcpSocketBufferSync::new(vec![0; 65535]);
+    let tcp4_tx_buffer = TcpSocketBufferSync::new(vec![0; 65535]);
     let tcp4_socket = TcpSocket::new(tcp4_rx_buffer, tcp4_tx_buffer);
 
     let ethernet_addr = EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);

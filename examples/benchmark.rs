@@ -15,7 +15,7 @@ use smoltcp::phy::{Device, Medium, wait as phy_wait};
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
 use smoltcp::iface::{NeighborCache, InterfaceBuilder};
 use smoltcp::socket::SocketSet;
-use smoltcp::socket::{TcpSocket, TcpSocketBuffer};
+use smoltcp::socket::{TcpSocket, TcpSocketBufferSync};
 use smoltcp::time::{Duration, Instant};
 
 const AMOUNT: usize = 1_000_000_000;
@@ -80,12 +80,12 @@ fn main() {
 
     let neighbor_cache = NeighborCache::new(BTreeMap::new());
 
-    let tcp1_rx_buffer = TcpSocketBuffer::new(vec![0; 65535]);
-    let tcp1_tx_buffer = TcpSocketBuffer::new(vec![0; 65535]);
+    let tcp1_rx_buffer = TcpSocketBufferSync::new(vec![0; 65535]);
+    let tcp1_tx_buffer = TcpSocketBufferSync::new(vec![0; 65535]);
     let tcp1_socket = TcpSocket::new(tcp1_rx_buffer, tcp1_tx_buffer);
 
-    let tcp2_rx_buffer = TcpSocketBuffer::new(vec![0; 65535]);
-    let tcp2_tx_buffer = TcpSocketBuffer::new(vec![0; 65535]);
+    let tcp2_rx_buffer = TcpSocketBufferSync::new(vec![0; 65535]);
+    let tcp2_tx_buffer = TcpSocketBufferSync::new(vec![0; 65535]);
     let tcp2_socket = TcpSocket::new(tcp2_rx_buffer, tcp2_tx_buffer);
 
     let ethernet_addr = EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);

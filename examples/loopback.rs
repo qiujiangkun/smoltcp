@@ -11,7 +11,7 @@ use log::{debug, error, info};
 
 use smoltcp::iface::{InterfaceBuilder, NeighborCache};
 use smoltcp::phy::{Loopback, Medium};
-use smoltcp::socket::{SocketSet, TcpSocket, TcpSocketBuffer};
+use smoltcp::socket::{SocketSet, TcpSocket, TcpSocketBufferSync};
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
 
@@ -99,16 +99,16 @@ fn main() {
         // when stack overflows.
         static mut TCP_SERVER_RX_DATA: [u8; 1024] = [0; 1024];
         static mut TCP_SERVER_TX_DATA: [u8; 1024] = [0; 1024];
-        let tcp_rx_buffer = TcpSocketBuffer::new(unsafe { &mut TCP_SERVER_RX_DATA[..] });
-        let tcp_tx_buffer = TcpSocketBuffer::new(unsafe { &mut TCP_SERVER_TX_DATA[..] });
+        let tcp_rx_buffer = TcpSocketBufferSync::new(unsafe { &mut TCP_SERVER_RX_DATA[..] });
+        let tcp_tx_buffer = TcpSocketBufferSync::new(unsafe { &mut TCP_SERVER_TX_DATA[..] });
         TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer)
     };
 
     let client_socket = {
         static mut TCP_CLIENT_RX_DATA: [u8; 1024] = [0; 1024];
         static mut TCP_CLIENT_TX_DATA: [u8; 1024] = [0; 1024];
-        let tcp_rx_buffer = TcpSocketBuffer::new(unsafe { &mut TCP_CLIENT_RX_DATA[..] });
-        let tcp_tx_buffer = TcpSocketBuffer::new(unsafe { &mut TCP_CLIENT_TX_DATA[..] });
+        let tcp_rx_buffer = TcpSocketBufferSync::new(unsafe { &mut TCP_CLIENT_RX_DATA[..] });
+        let tcp_tx_buffer = TcpSocketBufferSync::new(unsafe { &mut TCP_CLIENT_TX_DATA[..] });
         TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer)
     };
 
@@ -171,7 +171,7 @@ fn main() {
         }
 
         match iface.poll_delay(&socket_set, clock.elapsed()) {
-            Some(Duration { millis: 0 }) => debug!("resuming"),
+            Some(Duration::ZERO) => debug!("resuming"),
             Some(delay) => {
                 debug!("sleeping for {} ms", delay);
                 clock.advance(delay)

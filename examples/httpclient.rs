@@ -9,7 +9,7 @@ use log::debug;
 use smoltcp::phy::{Device, Medium, wait as phy_wait};
 use smoltcp::wire::{EthernetAddress, Ipv4Address, Ipv6Address, IpAddress, IpCidr};
 use smoltcp::iface::{NeighborCache, InterfaceBuilder, Routes};
-use smoltcp::socket::{SocketSet, TcpSocket, TcpSocketBuffer};
+use smoltcp::socket::{SocketSet, TcpSocket, TcpSocketBufferSync};
 use smoltcp::time::Instant;
 
 fn main() {
@@ -31,8 +31,8 @@ fn main() {
 
     let neighbor_cache = NeighborCache::new(BTreeMap::new());
 
-    let tcp_rx_buffer = TcpSocketBuffer::new(vec![0; 1024]);
-    let tcp_tx_buffer = TcpSocketBuffer::new(vec![0; 1024]);
+    let tcp_rx_buffer = TcpSocketBufferSync::new(vec![0; 1024]);
+    let tcp_tx_buffer = TcpSocketBufferSync::new(vec![0; 1024]);
     let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
 
     let ethernet_addr = EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);

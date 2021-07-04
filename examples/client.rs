@@ -7,7 +7,7 @@ use std::str::{self, FromStr};
 
 use smoltcp::iface::{InterfaceBuilder, NeighborCache, Routes};
 use smoltcp::phy::{wait as phy_wait, Device, Medium};
-use smoltcp::socket::{SocketSet, TcpSocket, TcpSocketBuffer};
+use smoltcp::socket::{SocketSet, TcpSocket, TcpSocketBufferSync};
 use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, Ipv4Address};
 
@@ -30,8 +30,8 @@ fn main() {
 
     let neighbor_cache = NeighborCache::new(BTreeMap::new());
 
-    let tcp_rx_buffer = TcpSocketBuffer::new(vec![0; 64]);
-    let tcp_tx_buffer = TcpSocketBuffer::new(vec![0; 128]);
+    let tcp_rx_buffer = TcpSocketBufferSync::new(vec![0; 64]);
+    let tcp_tx_buffer = TcpSocketBufferSync::new(vec![0; 128]);
     let tcp_socket = TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
 
     let ethernet_addr = EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x02]);

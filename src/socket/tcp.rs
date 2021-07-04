@@ -9,7 +9,7 @@ use core::task::Waker;
 use crate::{Error, Result};
 use crate::time::{Duration, Instant};
 use crate::socket::{SocketMeta, SocketHandle, PollAt};
-use crate::storage::{Assembler, RingBuffer, RingBufferSync, ChannelBufferSender, FixedBuffer};
+use crate::storage::{Assembler, RingBufferSync, ChannelBufferSender, FixedBuffer};
 #[cfg(feature = "async")]
 use crate::socket::WakerRegistration;
 use crate::wire::{IpProtocol, IpRepr, IpAddress, IpEndpoint, TcpSeqNumber, TcpRepr, TcpControl};
@@ -19,7 +19,6 @@ use std::sync::atomic::{Ordering, AtomicUsize};
 use std::mem::MaybeUninit;
 
 /// A TCP socket ring buffer.
-pub type SocketBuffer<'a> = RingBuffer<'a, u8>;
 pub type SocketBufferSync<'a> = RingBufferSync<'a, u8>;
 
 /// The state of a TCP socket, according to [RFC 793].
@@ -168,8 +167,8 @@ enum Timer {
     },
 }
 
-const ACK_DELAY_DEFAULT: Duration = Duration { millis: 10 };
-const CLOSE_DELAY: Duration = Duration { millis: 10_000 };
+const ACK_DELAY_DEFAULT: Duration = Duration::from_millis(10);
+const CLOSE_DELAY: Duration = Duration::from_millis(10_000);
 
 impl Default for Timer {
     fn default() -> Timer {

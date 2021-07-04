@@ -386,6 +386,8 @@ impl<'a, T: 'a> From<ManagedSlice<'a, T>> for RingBufferSync<'a, T> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::sync::Arc;
+
     #[test]
     fn test_buffer_length_changes() {
         let ring = RingBufferSync::new(vec![0; 2]);
