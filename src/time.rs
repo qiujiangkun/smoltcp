@@ -97,7 +97,7 @@ impl Instant {
 impl From<::std::time::Instant> for Instant {
     fn from(other: ::std::time::Instant) -> Instant {
         let elapsed = other.elapsed();
-        Instant::from_millis((elapsed.as_secs() * 1_000000) as i64 + elapsed.subsec_micros() as i64)
+        Instant::from_micros((elapsed.as_secs() * 1_000000) as i64 + elapsed.subsec_micros() as i64)
     }
 }
 
@@ -106,7 +106,7 @@ impl From<::std::time::SystemTime> for Instant {
     fn from(other: ::std::time::SystemTime) -> Instant {
         let n = other.duration_since(::std::time::UNIX_EPOCH)
             .expect("start time must not be before the unix epoch");
-        Self::from_millis(n.as_secs() as i64 * 1000000 + n.subsec_micros() as i64)
+        Self::from_micros(n.as_secs() as i64 * 1000000 + n.subsec_micros() as i64)
     }
 }
 
