@@ -1617,21 +1617,23 @@ impl<'a> TcpSocket<'a> {
         if let Some(ack_delay) = self.ack_delay {
             if self.ack_to_transmit() || self.window_to_update() {
                 self.ack_delay_until = match self.ack_delay_until {
-                    None => {
+                    // RFC1122 says "in a stream of full-sized segments there SHOULD be an ACK
+                    // for at least every second segment".
+                    // For now, we send an ACK every second received packet, full-sized or not.
+                    // Note: This is not RFC complaint
+                    Some(x) if x >= timestamp => {
+                        net_trace!("{}:{}:{}: delayed ack timer already started, forcing expiry",
+                            self.meta.handle, self.local_endpoint, self.remote_endpoint
+                        );
+
+                        None
+                    }
+                    _ => {
                         net_trace!("{}:{}:{}: starting delayed ack timer",
                             self.meta.handle, self.local_endpoint, self.remote_endpoint
                         );
 
                         Some(timestamp + ack_delay)
-                    }
-                    // RFC1122 says "in a stream of full-sized segments there SHOULD be an ACK
-                    // for at least every second segment".
-                    // For now, we send an ACK every second received packet, full-sized or not.
-                    Some(_) => {
-                        net_trace!("{}:{}:{}: delayed ack timer already started, forcing expiry",
-                            self.meta.handle, self.local_endpoint, self.remote_endpoint
-                        );
-                        None
                     }
                 };
             }
