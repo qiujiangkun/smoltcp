@@ -355,6 +355,8 @@ pub struct TcpSocket<'a> {
     /// ACK or window updates (ie, no data) won't be sent until expiry.
     ack_delay_until: Option<Instant>,
 
+    immediate_duplicate_acks: Option<((IpRepr, TcpRepr<'static>), u8)>,
+
     #[cfg(feature = "async")]
     rx_waker: WakerRegistration,
     #[cfg(feature = "async")]
@@ -416,6 +418,8 @@ impl<'a> TcpSocket<'a> {
             local_rx_dup_acks: 0,
             ack_delay: Some(ACK_DELAY_DEFAULT),
             ack_delay_until: None,
+
+            immediate_duplicate_acks: None,
 
             #[cfg(feature = "async")]
             rx_waker: WakerRegistration::new(),
@@ -1600,10 +1604,10 @@ impl<'a> TcpSocket<'a> {
                        self.meta.handle, self.local_endpoint, self.remote_endpoint,
                        contig_len, self.rx_buffer.len() + contig_len);
             self.rx_buffer.enqueue_unallocated(contig_len);
+            self.sync_read_buffer();
             // There's new data in rx_buffer, notify waiting task if any.
             #[cfg(feature = "async")]
                 self.rx_waker.wake_by_ref();
-            self.sync_read_buffer();
         }
 
         if !self.assembler.is_empty() {
@@ -1648,7 +1652,13 @@ impl<'a> TcpSocket<'a> {
             // packets for every packet it receives.
             net_trace!("{}:{}:{}: ACKing incoming segment",
                        self.meta.handle, self.local_endpoint, self.remote_endpoint);
-            Ok(Some(self.ack_reply(ip_repr, &repr)))
+            if !self.assembler.is_empty() {
+                let ack = self.ack_reply(ip_repr, &repr);
+                self.immediate_duplicate_acks = Some((ack.clone(), 0));
+                Ok(Some(ack))
+            } else {
+                Ok(Some(self.ack_reply(ip_repr, &repr)))
+            }
         } else {
             Ok(None)
         }
@@ -1715,7 +1725,15 @@ impl<'a> TcpSocket<'a> {
                               emit: F) -> Result<()>
         where F: FnOnce((IpRepr, TcpRepr)) -> Result<()> {
         if !self.remote_endpoint.is_specified() { return Err(Error::Exhausted); }
-
+        match self.immediate_duplicate_acks.as_mut() {
+            Some((p, c)) if *c < 2 => {
+                *c += 1;
+                return emit(p.clone())
+            }
+            _ => {
+                self.immediate_duplicate_acks = None;
+            }
+        }
         if self.remote_last_ts.is_none() {
             // We get here in exactly two cases:
             //  1) This socket just transitioned into SYN-SENT.
