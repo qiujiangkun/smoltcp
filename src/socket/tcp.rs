@@ -1632,6 +1632,9 @@ impl<'a> TcpSocket<'a> {
 
                         None
                     }
+                    Some(x) => {
+                        Some(x)
+                    }
                     _ => {
                         net_trace!("{}:{}:{}: starting delayed ack timer",
                             self.meta.handle, self.local_endpoint, self.remote_endpoint
