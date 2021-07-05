@@ -1625,7 +1625,7 @@ impl<'a> TcpSocket<'a> {
                     // for at least every second segment".
                     // For now, we send an ACK every second received packet, full-sized or not.
                     // Note: This is not RFC complaint
-                    Some(x) if x >= timestamp => {
+                    Some(x) if x <= timestamp => {
                         net_trace!("{}:{}:{}: delayed ack timer already started, forcing expiry",
                             self.meta.handle, self.local_endpoint, self.remote_endpoint
                         );
@@ -1989,6 +1989,8 @@ impl<'a> TcpSocket<'a> {
             PollAt::Now
         } else if self.seq_to_transmit() {
             // We have a data or flag packet to transmit.
+            PollAt::Now
+        } else if self.immediate_duplicate_acks.is_some() {
             PollAt::Now
         } else {
             let want_ack = self.ack_to_transmit() || self.window_to_update();
