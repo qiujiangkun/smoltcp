@@ -52,6 +52,7 @@ verbose = []
 "socket-icmp" = ["socket"]
 "socket-dhcpv4" = ["socket", "medium-ethernet", "proto-dhcpv4"]
 "async" = []
+"immediate-dup-acks" = []
 
 defmt-trace = []
 defmt-debug = []

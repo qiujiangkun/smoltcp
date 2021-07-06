@@ -1657,7 +1657,10 @@ impl<'a> TcpSocket<'a> {
                        self.meta.handle, self.local_endpoint, self.remote_endpoint);
             if !self.assembler.is_empty() {
                 let ack = self.ack_reply(ip_repr, &repr);
-                self.immediate_duplicate_acks = Some((ack.clone(), 0));
+                #[cfg(feature = "immediate-dup-acks")]
+                {
+                    self.immediate_duplicate_acks = Some((ack.clone(), 0));
+                }
                 Ok(Some(ack))
             } else {
                 Ok(Some(self.ack_reply(ip_repr, &repr)))
